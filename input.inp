@@ -14,7 +14,7 @@
 ### Do you wanna generate an initial path? (Y/N) ###
 ####################################################
 generate_new_path = Y
-initialize_path_from_points_from_file = Y
+initialize_path_from_points_from_file = N
 init_points_file = pdf_all_xmin_-1.2247_xmax_-0.7071.csv
 work_name = test     #Name the work (files will be named after the work name)
 path_point_frequency = 1 # change when not using every path point
@@ -37,8 +37,8 @@ input_work_name = test      #Give path of input file if N
 ###             with OVRVO-algorithm             ###
 ####################################################
 dt = 0.1         #Timestep of the path in base 10
-k_T = 0.05             #Temperature of system
-N = 101         #Number of timesteps
+k_T = 5.0             #Temperature of system
+N = 1001         #Number of timesteps
 theta = 1          #Saves every theta timestep 
 gamma = 1.0      #Friction coefficient (cant be zero if running path dynamics)
 m = 1               #mass of particle
@@ -46,19 +46,19 @@ m = 1               #mass of particle
 ####################################################
 ###        Regarding the potential (HO/DW)       ###
 ####################################################
-type_of_potential = DW
+type_of_potential = HO
 
 ####################################################
 ###    Parameters for HO potential of the form   ###
 ###             U(x) = 1/2*m*omega*x^2           ###
 ####################################################
-omega = 10          #Frequency of HO
+omega = 4          #Frequency of HO
 
 ####################################################
 ###    Parameters for DW potential of the form   ###
 ###      U(x) = U_0*(x^2-1)^2                      ###
 ####################################################
-U_0 = 1.0
+#U_0 = 1.0
 #x0_dw = 1
 
 ####################################################
@@ -75,7 +75,7 @@ do_path_dynamics = Y
 ####################################################
 ###         Parameters for path dynamics         ###
 ####################################################
-number_of_paths = 500000   #Paths to generate
+number_of_paths = 5000000   #Paths to generate
 delta_t = 0.001            #Ficticious time
 M = 1                       #Ficticious mass
 
@@ -89,7 +89,7 @@ fict_k_T = 0.1         #Ficticious kT
 ####################################################
 ###      Constraining path dynamics? (Y/N)       ###
 ####################################################
-constraints = Y              #Constrained? (Y/N)
+constraints = N              #Constrained? (Y/N)
 shake = Y                    #use shake? (Y/N)
 rattle = Y                   #use_rattle? (Y/N)
 constraint_tolerance = 1e-6  #constraint tolerance

@@ -40,15 +40,13 @@ def initialize_path_dynamics():
         print('Thermostat off on for real dynamics')
     
     if rank == 0:
-        lambda_As = pd.read_csv(init_points_file)["lambda_A"].to_numpy()
-        print(lambda_As)
+        lambda_As = np.array([0.0])
         idsA = np.array([i for i in range(len(lambda_As))])
-        lambda_Bs = np.array([0.0]*len(lambda_As)) #np.linspace(0.7071,1.2247,len(lambda_As))
+        lambda_Bs = np.array([0.0]*len(lambda_As))
         
         lambda_As = np.array_split(lambda_As, size)
         idsA = np.array_split(idsA, size)
         lambda_Bs = np.array_split(lambda_Bs, size)
-        print(lambda_As)
     else:
         lambda_As = None
         idsA = None
@@ -60,7 +58,7 @@ def initialize_path_dynamics():
     
     particle_array = []
     for i in range(len(lambda_As)):    
-        lambda_Bprimes = np.linspace(0.7071,1.2247,100) #np.random.uniform(1.0, lambda_Bs[i], 100)#1000)
+        lambda_Bprimes = np.array([0.0])
         
         for j in range(len(lambda_Bprimes)):
             pos_array, vel_array = OVRVO(lambda_As[i])
@@ -70,11 +68,17 @@ def initialize_path_dynamics():
             Pi_x = np.random.normal(size=N, scale=np.sqrt(M*fict_k_T))
             Pi_vx = np.random.normal(size=N, scale=np.sqrt(M*fict_k_T))
     
+            Pi_y = np.random.normal(size=N, scale=np.sqrt(M*fict_k_T))
+            Pi_vy = np.random.normal(size=N, scale=np.sqrt(M*fict_k_T))
+ 
+            Pi_z = np.random.normal(size=N, scale=np.sqrt(M*fict_k_T))
+            Pi_vz = np.random.normal(size=N, scale=np.sqrt(M*fict_k_T))
+ 
             #Pi_x -= np.sum(Pi_x)/len(Pi_x)
             #Pi_vx -= np.sum(Pi_vx)/len(Pi_vx)
     
-            Pi_pos = np.transpose(np.array([Pi_x, [0.0]*N, [0.0]*N]))
-            Pi_vel = np.transpose(np.array([Pi_vx, [0.0]*N, [0.0]*N]))
+            Pi_pos = np.transpose(np.array([Pi_x, Pi_y, Pi_z]))
+            Pi_vel = np.transpose(np.array([Pi_vx, Pi_vx, Pi_vz]))
     
             #pos_array = np.transpose(np.array([data["x"], data["y"], data["z"]]))
             #vel_array = np.transpose(np.array([data["vx"], data["vy"], data["vz"]]))
@@ -129,10 +133,55 @@ def initialize_constraints(particle_array):#, grad_constraints_matrix, lagrange_
 	#return lagrange_multipliers, rattle_multipliers
 	
 
+def OVRVO(r0):
+    r_array = []
+    v_array = []
+    c1 = math.exp(-gamma*dt) # c1 = a in the Crooks article
+    if gamma == 0:
+        c2 = 1 #c2 = b (the time rescaling fator) in the Crooks article
+    else:
+        c2 = np.sqrt(2/(gamma*dt)*math.tanh(gamma*dt/2))
+
+    if type_of_potential == 'HO':
+        r = np.random.normal(loc = 0.0, scale = np.sqrt((1./(m*omega**2))*k_T), size = 3)
+        v = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = 3)
+    elif type_of_potential == 'DW':
+        r = np.array(r0)
+        v = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = 3)
+
+    t = 0.0
+
+    r_array.append(r)
+    v_array.append(v)
+
+    for i in range(1,N):
+        # O-block
+        v = np.sqrt(c1)*v + np.sqrt((1-c1)*k_T/m) * np.random.normal(0,1,3)
+
+        # V-block
+        v = v + 0.5*c2*dt*force(r)/m
+
+        # R-block
+        r = r + c2*dt*v
+
+        # V-block
+        v = v + 0.5*c2*dt*force(r)/m
+
+        # O-block
+        v = np.sqrt(c1)*v + np.sqrt((1-c1)*k_T/m) * np.random.normal(0,1,3)
+
+        ### Saving the position and velocity in a .txt file ###
+        if i % theta == 0:
+            r_array.append(r)
+            v_array.append(v)
+
+    return np.array(r_array), np.array(v_array)
+'''
 def OVRVO(x0_DW):
 
     r_array = []
     v_array = []
+    
     c1 = math.exp(-gamma*dt) # c1 = a in the Crooks article
     if gamma == 0:
         c2 = 1
@@ -192,24 +241,31 @@ def OVRVO(x0_DW):
             #output_traj.write(str(x) + " " + str(v) + " \n")
             
     return np.array(r_array), np.array(v_array)
-            
+'''          
 
-def f(r_n):
-    new_forces = np.array([[0.0, 0.0, 0.0]]*len(r_n))
-    new_forces[:,0] = 4.0*U_0*(1 - (r_n[:,0]**2 + r_n[:,1]**2 + r_n[:,2]**2))*r_n[:,0] #-4/3*(4.0*r_n[:,0]**3 + 5.0*r_n[:,0]*r_n[:,1]**2 - 5.0*r_n[:,0])
-    return new_forces
+def force(r):
+  if type_of_potential == 'HO':
+    return -m*omega**2*r
+  elif type_of_potential == 'DW':
+    return 4.0*U_0*r*(1.0 - r**2)
 
-def f_prime(r_n):
-    new_force_derivatives = np.array([np.zeros((3,3))]*len(r_n))
-    new_force_derivatives[:,0,0] = 4.0*U_0*(1.0 - 3.0*r_n[:,0]**2)
+def force_prime(r_n):
+  if type_of_potential == 'HO':
+    return np.tile(-m*omega**2 * np.eye(3), (len(r_n), 1, 1))
+  elif type_of_potential == 'DW':
+    new_force_derivatives = np.zeros((len(r), 3, 3))
+    new_force_derivatives[:, 0, 0] = 4.0 * U_0 * (1.0 - 3.0 * r[:, 0] ** 2)
     return new_force_derivatives
 
-def f_div(r_n):    
-    return 4.0*U_0*(1.0 - 3.0*r_n[:,0]**2) #for 1D, for 2D 2*..., for 3D 3*...
+def force_div(r_n):    
+  if type_of_potential == 'HO': 
+    return -3*m*omega**2
+  elif type_of_potential == 'DW':
+    return 4.0*U_0*(1.0 - 3.0*r[:,0]**2) 
 
 def get_dS_vector(pos,vel):
-    forces = f(pos)
-    grad_forces = f_prime(pos)
+    forces = force(pos)
+    grad_forces = force_prime(pos)
     
     a = np.exp(-gamma*dt)
     b = np.sqrt(2/(gamma*dt)*math.tanh(gamma*dt/2))
@@ -250,11 +306,13 @@ def get_dS_vector(pos,vel):
 def get_S(pos,vel):
     a = np.exp(-gamma*dt)
     b = np.sqrt(2/(gamma*dt)*math.tanh(gamma*dt/2))
-    pot_0 = U_0*(1- pos[0][0]**2)**2
+    #pot_0 = U_0*(1- pos[0][0]**2)**2
+    pot_0 = 0.5*m*omega**2*pos[0,:]**2
+
     first_part = beta*(0.5*m*np.sum(vel[0]**2) + pot_0) + N*np.log(2*np.pi*(1-a)*b*dt/(m*beta))
     sum_part = np.sum(beta*m/(2*(1-a)) * \
-    ((pos[1:]-pos[:-1])/(b*dt) - b*dt/2*f(pos[:-1])/m - np.sqrt(a)*vel[:-1])**2\
-    + (np.sqrt(a)* ( (pos[1:]-pos[:-1])/(b*dt) + b*dt/2*f(pos[1:])/m) - vel[1:])**2)
+    ((pos[1:]-pos[:-1])/(b*dt) - b*dt/2*force(pos[:-1])/m - np.sqrt(a)*vel[:-1])**2\
+    + (np.sqrt(a)* ( (pos[1:]-pos[:-1])/(b*dt) + b*dt/2*force(pos[1:])/m) - vel[1:])**2)
     return (first_part + sum_part)/fict_beta
 
 
@@ -277,7 +335,7 @@ def write_to_file(name_of_variable, variable, path_number, writer, lagrange_mult
                 
                 #print(f"len(lagrange_multipliers): {len(lagrange_multipliers)")
                 #index_pt = np.where(variable_to_output==part)
-                writer_multipliers.writerow([path_number, part.idp, lagrange_multipliers_to_output[index_pt][0,0], lagrange_multipliers_to_output[index_pt][0,1], rattle_multipliers_to_output[index_pt][0,0], rattle_multipliers_to_output[index_pt][0,1]])
+                #writer_multipliers.writerow([path_number, part.idp, lagrange_multipliers_to_output[index_pt][0,0], lagrange_multipliers_to_output[index_pt][0,1], rattle_multipliers_to_output[index_pt][0,0], rattle_multipliers_to_output[index_pt][0,1]])
                 index_pt += 1
         elif name_of_variable == 'Temp':
             variable_to_output = np.sum(variable_to_output, axis=0) 
@@ -300,7 +358,7 @@ def BAOAB(particle_array, lagrange_multipliers, rattle_multipliers, grad_constra
 
         ### O-block ###
         #pos, vel = pos, vel
-        random_vector = np.random.multivariate_normal(mean = (0.0, 0.0, 0.0), cov = [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], size=(len(part.Pi_array), len(part.Pi_array[0])))
+        random_vector = np.random.multivariate_normal(mean = (0.0, 0.0, 0.0), cov = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], size=(len(part.Pi_array), len(part.Pi_array[0])))
         part.Pi_array = part.Pi_array*math.exp(-fict_gamma*delta_t)+math.sqrt(fict_k_T * M * (1-math.exp(-2*fict_gamma*delta_t)))*random_vector  #*np.random.normal(0,1)
         
         
@@ -491,10 +549,14 @@ def path_sampling(particle_array, lagrange_multiliers, rattle_multipliers, grad_
         #Temp_real, Temp_fictitious, T_real_config, T_real_config_check = get_Temp(particle_array)
         Temp_real, Temp_fictitious, T_real_config = get_Temp(particle_array)
         Ham = get_Ham(particle_array)
-        
-        if Ham == np.inf or Temp_real == np.inf or Temp_fictitious == np.inf:
-            print('The path exploded')
-            break
+
+        if np.any(Ham == np.inf) or np.any(Temp_real == np.inf) or np.any(Temp_fictitious == np.inf):
+          print('The path exploded')
+          break
+
+        #if Ham == np.inf or Temp_real == np.inf or Temp_fictitious == np.inf:
+        #    print('The path exploded')
+        #    break
 
 def get_Temp(particle_array): #change for 3 d
     T_real = 0.0
@@ -502,9 +564,9 @@ def get_Temp(particle_array): #change for 3 d
     T_real_config = 0.0
     #T_real_config_check = 0.0
     for part in particle_array:
-    	T_real += np.sum(m*part.vel_array**2)/(N-2)
-    	T_fict += np.sum(part.Pi_array**2/M)/(2*N-2)
-    	T_real_config -= np.sum(f(part.pos_array[1:-1])**2)/np.sum(f_div(part.pos_array[1:-1]))
+    	T_real += (1./3.)*np.sum(m*part.vel_array**2)/N
+    	T_fict += (1./3.)*np.sum(part.Pi_array**2/M)/(2*N)
+    	T_real_config -= np.sum(force(part.pos_array[1:-1])**2)/np.sum(force_div(part.pos_array[1:-1]))
     	#T_real_config_check += np.sum(m * omega**2 * part.pos_array**2)/N
     	
     	#print(T_real, T_fict, len(part.vel_array), len(part.Pi_array))
