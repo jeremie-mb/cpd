@@ -6,7 +6,7 @@
 horizontal = 0
 vertical = 1
 restart_horizontal_from_file = 0
-restart_vertical_from_file = 1
+restart_vertical_from_file = 0
 
 ####################################################
 ####################################################
@@ -22,16 +22,16 @@ restart_vertical_from_file = 1
 
 # Or with the number of cells density (make sure the LJ parameters are such that r_LJ = L / N_cells
 N_cells = 2
-density = 0.84
+density = 0.807
 
 ####################################################
 ### Parameters for generating an initial path    ### 
 ###             with OVRVO-algorithm             ###
 ####################################################
-horizontal_dt = 0.0005         #Timestep of the path in base 10
-k_T = 1.0             #Temperature of system
-N_horizontal = 101       #Number of timesteps
-gamma = 1.0      #Friction coefficient (cant be zero if running path dynamics)
+horizontal_dt = 0.0046         #Timestep of the path in base 10
+k_T = 0.786            #Temperature of system
+N_horizontal = 101     #Number of timesteps
+gamma = 0.1
 m = 1               #mass of particle
 
 ####################################################
@@ -60,7 +60,8 @@ omega = 4          #Frequency of HO
 lennard_jones_on = 1
 lj_epsilon = 1.0
 lj_sigma = 1.0
-lj_cutoff = 3.0
+lj_cutoff = 2.25
+lj_cap = 0.8
 
 ####################################################
 ####################################################
@@ -71,17 +72,16 @@ lj_cutoff = 3.0
 ####################################################
 ###         Parameters for path dynamics         ###
 ####################################################
-N_vertical = 50   #Paths to generate
-#vertical_dt = 0.000005            #Ficticious time
-vertical_dt =  0.00001            #Ficticious time
+N_vertical = 10000   #Paths to generate
+vertical_dt = 0.000046            #Ficticious time
 M = 1                       #Ficticious mass
 
 ####################################################
 ###      Thermostated path dynamics? (Y/N)       ###
 ####################################################
 thermostat = Y              #Thermostated? (Y/N)
-fict_gamma = 0.1         #Ficticious gamma
-fict_k_T = 0.1         #Ficticious kT
+fict_gamma = 100.0         #Ficticious gamma
+fict_k_T = 1.0         #Ficticious kT
 
 ####################################################
 ###      Constraining path dynamics? (Y/N)       ###
@@ -96,4 +96,4 @@ constraint_tolerance = 1e-6  #constraint tolerance
 ###             parameters be saved?             ###
 ####################################################
 freq_output_horizontal = 1
-freq_output_vertical = 10
+freq_output_vertical = 1

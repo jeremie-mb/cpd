@@ -7,6 +7,8 @@ import pandas as pd
 import time
 from numba import jit
 
+np.set_printoptions(precision=12, suppress = True)
+
 path = os.path.realpath(__file__)
 path = path.strip(os.path.basename(sys.argv[0]))
 
@@ -75,7 +77,7 @@ class Paths:
           self.X[0, 0, atom_idx, :] = [row['x'], row['y'], row['z']]
           self.X[1, 0, atom_idx, :] = [row['vx'], row['vy'], row['vz']]
 
-          _, _, N_atoms, box_length = initialize_fcc_lattice(N_cells, density)
+          _, _, N_atoms, box_length = initialize_fcc_lattice2(N_cells, density)
           self.box_length = box_length
 
         self.kinetic_energy = np.zeros(N_horizontal)
@@ -94,13 +96,19 @@ class Paths:
           In this case, you can choose the density but make sure the LJ eq. distance
           is the lattice spacing aka L / N_cells = r_LJ
           '''
-          r, lattice_spacing, N_atoms, box_length = initialize_fcc_lattice(N_cells, density)
+          r, lattice_spacing, N_atoms, box_length = initialize_fcc_lattice2(N_cells, density)
           r_eq = (2**(1. /6 )) * lj_sigma 
           print(f"You asked for N_cells = {N_cells} and density = {density}. \nInitializing {N_atoms} in {N_cells} FCC cells in a box of dimension {box_length}.")
           print(f"LJ equilibrium distance is {r_eq} and nearest FCC distance is {lattice_spacing / np.sqrt(2)}")
 
           ''' Velocities drawn from Boltzmann dist '''
-          v = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = 3*N_atoms).reshape(N_atoms, 3)
+          np.random.seed(0)
+          vx = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = N_atoms)
+          vy = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = N_atoms)
+          vz = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = N_atoms)
+          v = np.transpose([vx, vy, vz])
+          #v = np.random.normal(loc = 0.0, scale = 0., size = 3*N_atoms).reshape(N_atoms, 3)
+          v -= np.mean(v, axis = 0)
         else: 
           raise ValueError("No potential and no Lennard Jones")
 
@@ -159,6 +167,7 @@ class Paths:
         force_value = self.get_force_OVRVO()
  
         # V-block
+
         v = v + 0.5*c2*horizontal_dt*force_value/m
 
         # O-block
@@ -187,9 +196,19 @@ class Paths:
           for hor in range(N_horizontal):  
             if hor % freq_output_horizontal == 0: 
               for atom_idx in range(1, N_atoms+1): 
-                x, y, z = [f'{self.X[0, hor, atom_idx -1, i]:.5f}' for i in range(3)] 
-                vx, vy, vz = [f'{self.X[1, hor, atom_idx -1, i]:.5f}' for i in range(3)]
-                        
+                vx, vy, vz = [f'{self.X[1, hor, atom_idx -1, i]:12.8g}' for i in range(3)]
+                
+                dx = self.X[0, hor, atom_idx - 1, 0] 
+                dy = self.X[0, hor, atom_idx - 1, 1] 
+                dz = self.X[0, hor, atom_idx - 1, 2] 
+
+                dx = dx - self.box_length * np.round( dx / self.box_length)
+                dy = dy - self.box_length * np.round( dy / self.box_length)
+                dz = dz - self.box_length * np.round( dz / self.box_length)
+
+                # Write folded positions
+                x, y, z = [f"{alpha:12.8g}" for alpha in [dx, dy, dz]]
+
                 row = [str(self.vertical_iter), str(hor), str(atom_idx), x, y, z, vx, vy, vz]
                 outfile_traj.write(",".join(row) + "\n")
 
@@ -267,9 +286,10 @@ class Paths:
 
       with open("mean_vertical_observables.csv", write_mode) as outfile_traj:
         if self.vertical_iter == 0:
-          outfile_traj.write(",".join(["vertical_iter", "temperature", "kinetic_energy", "potential_energy", "total_energy"]) + "\n")
+          outfile_traj.write(",".join(["vertical_iter", "temperature", "fict_temperature", "kinetic_energy", "potential_energy", "total_energy"]) + "\n")
         rows = zip([str(self.vertical_iter)],
                    [f'{temperature}'], 
+                   [f'{fict_temperature}'], 
                    [f'{self.kinetic_energy_mean}'], 
                    [f'{self.potential_energy_mean}'],
                    [f'{self.total_energy_mean}'])
@@ -347,7 +367,6 @@ class Paths:
           self.PI[1, horizontal_iter, atom_idx, :] = [row['pivx'], row['pivy'], row['pivz']]
       
         self.get_dS()
-
       else:
         if not(os.path.exists("new_horizontal_trajectories.csv")):
           raise ValueError("Vertical dynamic cannot start without initial horizontal path")
@@ -391,7 +410,7 @@ class Paths:
     def BAOAB(self):
 
       ''' 
-      dS is always avaialable here
+      dS is always available here
       either calculated in the previous iteration of BAOAB or in the vertical initialization
       '''
 
@@ -405,11 +424,13 @@ class Paths:
       random_vector = np.random.multivariate_normal(mean = (0.0, 0.0, 0.0),\
       cov = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], size = (2, N_horizontal, N_atoms))
 
-      self.PI *= math.exp(-fict_gamma*vertical_dt) 
-      self.PI += math.sqrt(fict_k_T * M * (1-math.exp(-2*fict_gamma*vertical_dt)))*random_vector
+      if fict_gamma != 0.0:
+        self.PI *= math.exp(-fict_gamma*vertical_dt) 
+        self.PI += math.sqrt(fict_k_T * M * (1-math.exp(-2*fict_gamma*vertical_dt)))*random_vector
 
       # A block
       self.X += self.PI*(vertical_dt/(2*M))
+
       self.get_dS()
 
       ''' LIGHTHOUSE add shake '''
@@ -461,11 +482,13 @@ class Paths:
       return self.total_energy_mean
 
     def get_potential_energy_vector(self):
-      _, self.potential_energy_vector = compute_potential_energy_helper(self.X, self.box_length)
+      self.potential_energy_vector = compute_potential_energy_helper(self.X, self.box_length)
       return self.potential_energy_vector
 
     def get_potential_energy_mean(self):
-      self.potential_energy_mean, _ = compute_potential_energy_helper(self.X, self.box_length)
+      #if self.potential_energy_vector == None:
+      #  raise ValueError("Cannot calculate potential_energy_vector_mean before potential_energy_vector")
+      self.potential_energy_mean = np.mean(self.potential_energy_vector)
       return self.potential_energy_mean
  
     def get_force_divergence(self):    
@@ -488,8 +511,8 @@ class Paths:
       return np.array(traces_over_time).reshape(N_horizontal, N_atoms)
 
     def get_dS(self): # X is of size (2, N, N_atoms, 3) 
-      self.dS = get_dS_helper_manually(self.X)
-      #self.dS = get_dS_helper(self.X)
+      #self.dS = get_dS_helper_manually(self.X)
+      self.dS = get_dS_helper(self.X)
       return self.dS
 
 
@@ -498,47 +521,6 @@ class Paths:
 Below are all the functions which use numba for acceleration, and some utility functions 
 They rely on numba and so are outside the Paths class because numba works better with functions than with methods
 '''
-
-@jit(nopython=True)
-def LJ_compute_force_helper(positions, box_length):
-      force = np.zeros_like(positions) # (N_atoms, 3)
-      box_lengths = np.array([box_length, box_length, box_length])
-
-      potential_energy = 0
-      for i in range(N_atoms):
-        for j in range(i+1, N_atoms):
-            r_ij = positions[j] - positions[i]
-
-            # Apply the minimum image convention
-            r_ij -= box_lengths * np.round(r_ij / box_lengths)
-
-            r_ij_norm = np.sqrt(np.sum(r_ij**2))
-
-            if r_ij_norm == 0:
-                raise ValueError("r_ij_norm = 0")
-            # WCA
-            # if r_ij > 2**(1./6)*lj_sigma:
-            #    continue
-            if r_ij_norm > lj_cutoff:
-                continue
-
-            r_ij_inv = 1. / r_ij_norm
-
-            # Compute the force magnitude according to the Lennard-Jones potential
-            force_mag = 24 * lj_epsilon * (2*lj_sigma**12*r_ij_inv**13 - lj_sigma**6*r_ij_inv**7)
-
-            V_ij = 4 * lj_epsilon * ((lj_sigma / r_ij)**12 - (lj_sigma / r_ij)**6)
-            potential_energy += V_ij
-
-            # Add this force to the total force on both particles i and j
-            # Note: the force on particle j is the negative of the force on particle i
-            force_ij = force_mag * r_ij * r_ij_inv
-
-            force[i, :] -= force_ij
-            force[j, :] += force_ij
-
-      return force, potential_energy
-
 @jit(nopython=True)
 def LJ_force(X): # X[0] is of size (N_horizontal, N_atoms, 3)
     force = np.zeros_like(X[0])
@@ -549,20 +531,25 @@ def LJ_force(X): # X[0] is of size (N_horizontal, N_atoms, 3)
                 
                 # Apply the minimum image convention
                 r_ij -= box_length * np.round(r_ij / box_length)
-
                 r_ij_norm = np.sqrt(np.sum(r_ij**2))  # Replaced np.linalg.norm
 
                 if r_ij_norm == 0:
                     raise ValueError("r_ij_norm = 0")
-                #if r_ij_norm > 2**(1./6)*lj_sigma:
-                #    continue
                 if r_ij_norm > lj_cutoff:
                     continue
 
                 r_ij_inv = 1. / r_ij_norm
+                lj_cutoff_inv = 1. / lj_cutoff
 
                 # Compute the force magnitude according to the Lennard-Jones potential
-                force_mag = 24 * lj_epsilon * (2*lj_sigma**12*r_ij_inv**13 - lj_sigma**6*r_ij_inv**7)
+                if r_ij_norm < lj_cap:
+                  lj_cap_inv = 1. / lj_cap
+                  # Capping the potential
+                  force_mag = 24*lj_epsilon*(2*lj_sigma**12 * lj_cap_inv**13 - lj_sigma**6 * lj_cap_inv**7)
+                  force_mag -= 24 * lj_epsilon * (2*lj_sigma**12*lj_cutoff_inv**13 - lj_sigma**6*lj_cutoff_inv**7)
+                else:
+                  force_mag = 24 * lj_epsilon * (2*lj_sigma**12*r_ij_inv**13 - lj_sigma**6*r_ij_inv**7)
+                  force_mag -= 24 * lj_epsilon * (2*lj_sigma**12*lj_cutoff_inv**13 - lj_sigma**6*lj_cutoff_inv**7)
 
                 # Add this force to the total force on both particles i and j
                 # Note: the force on particle j is the negative of the force on particle i
@@ -580,42 +567,55 @@ def LJ_force_jacobian(X):
 
     for t in range(N_horizontal):
         for i in range(N_atoms):
-            # Calculate the Jacobian of the force F_i 
+            # Calculate the Jacobian of the force F_i acting on atom i
             for j in range(N_atoms):
-                if i != j:
+                if j != i:
                     r_ij = X[0, t, j] - X[0, t, i]
                     # Apply the minimum image convention
                     r_ij -= box_length * np.round(r_ij / box_length)
-
                     r_ij_norm = np.sqrt(np.sum(r_ij**2))  # Replaced np.linalg.norm
 
                     if r_ij_norm == 0:
                       raise ValueError("r_ij = 0")
-                    # turn on if you want WCA instead of LJ potential
-                    #if r_ij_norm > 2**(1./6)*lj_sigma:
-                    #  continue
                     if r_ij_norm > lj_cutoff:
                       continue
 
-                    for alpha in range(3): 
-                      for beta in range(3):
-                        if alpha == beta: 
-                          # Diagonal terms
+                    if r_ij_norm < lj_cap:
+                      A = 24*lj_epsilon*(lj_sigma**6 / lj_cap**7 - 2*lj_sigma**12 / lj_cap**13)
+
+                      for alpha in range(3):
                           delta_alpha = r_ij[alpha]
+                          for beta in range(alpha, 3):
+                              if alpha == beta:
+                                  result = A*r_ij_norm**(-1) - delta_alpha**2 * r_ij_norm**(-3)
+                              else:
+                                  delta_beta = r_ij[beta]
+                                  result = - A * delta_alpha * delta_beta * r_ij_norm**(-3)
 
-                          result = 24*lj_epsilon*(2*lj_sigma**12*(14*delta_alpha**2*r_ij_norm**(-16) - r_ij_norm**(-14))\
-                                                  - lj_sigma**6*(8*delta_alpha**2*r_ij_norm**(-10) - r_ij_norm**(-8)))
-                        else:
-                          # Off-diagonal elements
-                          # Could calculte only half of them
-                          delta_alpha = r_ij[alpha] 
+                              jacobians_over_time[t, i, alpha, beta] -= result
+                              jacobians_over_time[t, i, beta, alpha] -= result
+                    else:
+                      lj_factor1 = 24 * lj_epsilon
+                      lj_factor2 = 2 * lj_sigma ** 12
+                      lj_factor3 = lj_sigma ** 6
+                      lj_factor4 = r_ij_norm ** (-16)
+                      lj_factor5 = r_ij_norm ** (-14)
+                      lj_factor6 = r_ij_norm ** (-10)
+                      lj_factor7 = r_ij_norm ** (-8)
 
-                          delta_beta = r_ij[beta] 
+                      for alpha in range(3):
+                          delta_alpha = r_ij[alpha]
+                          for beta in range(alpha, 3):
+                              if alpha == beta:
+                                  # Diagonal terms
+                                  result = lj_factor1 * delta_alpha * (lj_factor2 * (14 * delta_alpha ** 2 * lj_factor4 - lj_factor5) - lj_factor3 * (8 * delta_alpha ** 2 * lj_factor6 - lj_factor7))
+                              else:
+                                  # Off-diagonal elements (symmetric)
+                                  delta_beta = r_ij[beta]
+                                  result = lj_factor1 * delta_alpha * delta_beta * (28 * lj_factor2 * lj_factor4 - 8 * lj_factor3 * lj_factor6)
 
-                          result = 24*lj_epsilon*delta_alpha*delta_beta*(28*lj_sigma**(12)*r_ij_norm**(-16) - 8*lj_sigma**6*r_ij_norm**(-10))
-                           
-                        jacobians_over_time[t, i, alpha, beta] -= result
-
+                              jacobians_over_time[t, i, alpha, beta] -= result
+                              jacobians_over_time[t, i, beta, alpha] -= result
     return jacobians_over_time
 
 @jit(nopython=True)
@@ -657,6 +657,7 @@ def get_force_jacobian(X): # of size (N_horizontal, N_atoms, 3 , 3)
 def get_dS_helper(X):
   
   grad_forces = get_force_jacobian(X)
+
   forces = get_force(X)
   
   a = np.exp(-gamma*horizontal_dt)
@@ -705,16 +706,11 @@ def get_dS_helper(X):
 
   return np.array([dS_r_array, dS_v_array])
 
-
-
-#@jit(nopython=True)
+@jit(nopython=True)
 def get_dS_helper_manually(X):
   '''
   Same as get_dS_helper() but not vectorized for checking (it yields same results)
   '''
-  print(f"beta in ds_helper is {beta}")
-  print(f"fict_beta in ds_helper is {fict_beta}")
-
 
   grad_forces = get_force_jacobian(X)
   forces = get_force(X)
@@ -773,31 +769,36 @@ def LJ_compute_force_helper(positions, box_length):
       potential_energy = 0
       for i in range(N_atoms):
         for j in range(i+1, N_atoms):
-            dist_vec = positions[i] - positions[j]
 
+            r_ij = positions[j] - positions[i]
+            
             # Apply the minimum image convention
-            dist_vec -= box_lengths * np.round(dist_vec / box_lengths)
+            r_ij -= box_lengths * np.round(r_ij / box_lengths)
 
-            r_ij = np.sqrt(np.sum(dist_vec**2))
-            if r_ij == 0:
-                raise ValueError("r_ij = 0")
-            if r_ij > lj_cutoff:
+            r_ij_norm = np.sqrt(np.sum(r_ij**2))
+
+            if r_ij_norm == 0:
+                raise ValueError("r_ij_norm = 0")
+            if r_ij_norm > lj_cutoff:
                 continue
 
-            r_ij_inv = 1. / r_ij
+            r_ij_inv = 1. / r_ij_norm
+            lj_cutoff_inv = 1. / lj_cutoff
 
             # Compute the force magnitude according to the Lennard-Jones potential
-            force_mag = 24 * lj_epsilon * ((2*(lj_sigma * r_ij_inv)**13) - (lj_sigma * r_ij_inv)**7)
+            force_mag = 24 * lj_epsilon * (2*lj_sigma**12*r_ij_inv**13 - lj_sigma**6*r_ij_inv**7)
+            force_mag -= 24 * lj_epsilon * (2*lj_sigma**12*lj_cutoff_inv**13 - lj_sigma**6*lj_cutoff_inv**7)
 
-            V_ij = 4 * lj_epsilon * ((lj_sigma / r_ij)**12 - (lj_sigma / r_ij)**6)
+            V_ij = 4 * lj_epsilon * ((lj_sigma*r_ij_inv)**12 - (lj_sigma*r_ij_inv)**6) - 4 * lj_epsilon * ((lj_sigma*lj_cutoff_inv)**12 + (lj_sigma*lj_cutoff_inv)**6)
+
             potential_energy += V_ij
 
             # Add this force to the total force on both particles i and j
             # Note: the force on particle j is the negative of the force on particle i
-            force_ij = force_mag * dist_vec * r_ij_inv
+            force_ij = force_mag * r_ij * r_ij_inv
 
-            force[i, :] += force_ij
-            force[j, :] -= force_ij
+            force[i, :] -= force_ij
+            force[j, :] += force_ij
 
       return force, potential_energy
 
@@ -805,30 +806,119 @@ def LJ_compute_force_helper(positions, box_length):
 @jit(nopython=True)
 def compute_potential_energy_helper(X, box_length):
 
-    box_lengths = np.array([box_length, box_length, box_length])
+      box_lengths = np.array([box_length, box_length, box_length])
 
-    potential_energy_vector = np.zeros(N_horizontal)
-    for t in range(N_horizontal):
-      for i in range(N_atoms):
-        for j in range(i+1, N_atoms):
-          dist_vec = X[0, t, i, :] - X[0, t, j, :]
+      potential_energy = np.zeros(N_horizontal)
 
-          # Apply the minimum image convention
-          dist_vec -= box_lengths * np.round(dist_vec / box_lengths)
+      for t in range(N_horizontal):
+        for i in range(N_atoms):
+          for j in range(i+1, N_atoms):
 
-          r_ij = np.sqrt(np.sum(dist_vec**2))
-          if r_ij == 0:
-            raise ValueError("r_ij = 0")
-          if r_ij > lj_cutoff:
-            continue
+            r_ij = X[0, t, j, :] - X[0, t, i, :]
+            
+            # Apply the minimum image convention
+            r_ij -= box_lengths * np.round(r_ij / box_lengths)
 
-          V_ij = 4 * lj_epsilon * ((lj_sigma / r_ij)**12 - (lj_sigma / r_ij)**6)
-          potential_energy_vector[t] += V_ij
+            r_ij_norm = np.sqrt(np.sum(r_ij**2))
 
-    potential_energy_mean = np.mean(potential_energy_vector)
+            if r_ij_norm == 0:
+                raise ValueError("r_ij_norm = 0")
+            if r_ij_norm > lj_cutoff:
+                continue
 
-    return potential_energy_mean, potential_energy_vector
+            lj_cutoff_inv = 1. / lj_cutoff
 
+            if r_ij_norm < lj_cap:
+              lj_cap_inv = 1. / lj_cap
+              A = 24*lj_epsilon*(lj_sigma**6 * lj_cap_inv**7 - 2*lj_sigma**12 * lj_cap_inv**13)
+              V_ij = A*(r_ij_norm - lj_cap)
+              V_ij += 4 * lj_epsilon * ((lj_sigma*lj_cap_inv)**12 - (lj_sigma*lj_cap_inv)**6) 
+              V_ij -= 4 * lj_epsilon * ((lj_sigma*lj_cutoff_inv)**12 + (lj_sigma*lj_cutoff_inv)**6)
+            else:
+              r_ij_inv = 1. / r_ij_norm
+              V_ij = 4 * lj_epsilon * ((lj_sigma*r_ij_inv)**12 - (lj_sigma*r_ij_inv)**6) 
+              V_ij -= 4 * lj_epsilon * ((lj_sigma*lj_cutoff_inv)**12 + (lj_sigma*lj_cutoff_inv)**6)
+
+            potential_energy[t] += V_ij
+
+      return potential_energy
+
+
+
+
+def initialize_fcc_lattice2(N_cells, density):
+
+    a=(4/density)**(1./3.) # FCC has 4 atoms per lattice cell
+    L = a * N_cells 
+    natom = 4 * N_cells**3  # total number of atoms in the box
+
+    j  = 0
+    xi = 0.
+    yi = 0.
+    zi = 0.
+    delta=0.0
+    rrx = np.random.normal(0., delta, natom)
+    rry = np.random.normal(0., delta, natom)
+    rrz = np.random.normal(0., delta, natom)
+
+    rx = np.zeros(natom)
+    ry = np.zeros(natom)
+    rz = np.zeros(natom)
+
+    for nx in range(N_cells):
+      for ny in range(N_cells):
+        for nz in range(N_cells):
+          rx[j] = xi + a*nx + rrx[j]
+          ry[j] = yi + a*ny + rry[j]
+          rz[j] = zi + a*nz + rrz[j]
+
+
+          rx[j]/= L
+          rx[j]-= np.rint(rx[j])
+          ry[j]/= L
+          ry[j]-= np.rint(ry[j])
+          rz[j]/= L
+          rz[j]-= np.rint(rz[j])
+          j +=1
+
+          rx[j] = xi + a*nx + rrx[j] + 0.5*a
+          ry[j] = yi + a*ny + rry[j] + 0.5*a
+          rz[j] = zi + a*nz + rrz[j]
+
+          rx[j]/= L
+          rx[j]-= np.rint(rx[j])
+          ry[j]/= L
+          ry[j]-= np.rint(ry[j])
+          rz[j]/= L
+          rz[j]-= np.rint(rz[j])
+          j +=1
+
+          rx[j] = xi + a*nx + rrx[j] + 0.5*a
+          ry[j] = yi + a*ny + rry[j]
+          rz[j] = zi + a*nz + rrz[j] + 0.5*a
+
+          rx[j]/= L
+          rx[j]-= np.rint(rx[j])
+          ry[j]/= L
+          ry[j]-= np.rint(ry[j])
+          rz[j]/= L
+          rz[j]-= np.rint(rz[j])
+          j +=1
+
+          rx[j] = xi + a*nx + rrx[j]
+          ry[j] = yi + a*ny + rry[j] + 0.5*a
+          rz[j] = zi + a*nz + rrz[j] + 0.5*a
+          rx[j]/= L
+          rx[j]-= np.rint(rx[j])
+          ry[j]/= L
+          ry[j]-= np.rint(ry[j])
+          rz[j]/= L
+          rz[j]-= np.rint(rz[j])
+          j +=1
+
+    all_points = np.array(np.transpose([rx*L, ry*L, rz*L]))
+    # The number of atoms is already correct so no need to shuffle and slice
+    return all_points, a, natom, L
 
 def initialize_fcc_lattice(N_cells, density):
 
@@ -855,7 +945,7 @@ def initialize_fcc_lattice(N_cells, density):
 
 def read_and_check_input_file(name = "input.inp"):
 
-  global density, L, N_cells, horizontal_dt, k_T, gamma, type_of_potential, omega, U_0, a, b, N_horizontal, N_atoms, vertical_dt, M, m, thermostat, fict_gamma, save_config_freq, save_Temp_freq, save_pos_freq, save_vel_freq, save_Ham_freq, save_Obs_freq, beta, fict_beta, fict_k_T, x0_HO, init_path_from_points_from_file, init_points_file, generate_new_traj, writer_traj, writer_H, writer_T, writer_obs, lennard_jones_on, lj_sigma, lj_epsilon, lj_cutoff, freq_output_horizontal, freq_output_vertical, N_vertical, restart_horizontal_from_file, restart_vertical_from_file, vertical, horizontal
+  global density, L, N_cells, horizontal_dt, k_T, gamma, type_of_potential, omega, U_0, a, b, N_horizontal, N_atoms, vertical_dt, M, m, thermostat, fict_gamma, save_config_freq, save_Temp_freq, save_pos_freq, save_vel_freq, save_Ham_freq, save_Obs_freq, beta, fict_beta, fict_k_T, x0_HO, init_path_from_points_from_file, init_points_file, generate_new_traj, writer_traj, writer_H, writer_T, writer_obs, lennard_jones_on, lj_sigma, lj_epsilon, lj_cutoff, freq_output_horizontal, freq_output_vertical, N_vertical, restart_horizontal_from_file, restart_vertical_from_file, vertical, horizontal, lj_cap
  
   input_file = open(path + name, 'r')
 
@@ -910,7 +1000,11 @@ def read_and_check_input_file(name = "input.inp"):
           omega = float(line[1].split()[0])
       elif line[0].strip() == 'x0_HO' and type_of_potential == 'HO':
           x0_HO = float(line[1].split()[0])
+      # Capping only affecs vertical dynamics
+      elif line[0].strip() == 'lj_cap':
+          lj_cap = float(line[1].split()[0])
 
+      # BAOAB parameters
       elif line[0].strip() == 'N_vertical':
           N_vertical = int(line[1].split()[0])
       elif line[0].strip() == 'vertical_dt':
@@ -965,7 +1059,7 @@ def read_and_check_input_file(name = "input.inp"):
 
   if vertical:
     if fict_gamma == 0:
-      raise ValueError('You are running path dynamics with fict_gamma = 0, which is not possible. Stopping the program')
+      print('You are running path dynamics with fict_gamma = 0')
 
   if horizontal and vertical:
     raise ValueError("Please run horizontal and vertical dynamics separately")
@@ -1017,4 +1111,9 @@ if __name__ == "__main__":
         paths.vertical_iter += 1
 
       print("Vertical dynamic completed")
+
+      end = time.time()
+      print(f"total time: {end-start}")
+
       quit()
+
