@@ -21,36 +21,34 @@ restart_vertical_from_file = 0
 # Either with the number of atoms
 
 # Or with the number of cells density (make sure the LJ parameters are such that r_LJ = L / N_cells
-N_cells = 2
+N_cells = 1 # will only be used if using FCC initialization (case of LJ particles)
 density = 0.807
+
+natoms = 2 # will be used if using HO potential (no LJ)
+
+init_FCC = 0
 
 ####################################################
 ### Parameters for generating an initial path    ### 
 ###             with OVRVO-algorithm             ###
 ####################################################
-horizontal_dt = 0.0046         #Timestep of the path in base 10
-k_T = 0.786            #Temperature of system
-N_horizontal = 101     #Number of timesteps
-gamma = 0.1
+horizontal_dt = 0.01         #Timestep of the path in base 10
+k_T = 1.0            #Temperature of system
+N_horizontal = 1001     #Number of timesteps
+gamma = 1.0
 m = 1               #mass of particle
 
 ####################################################
 ###        Regarding the external potential (HO/DW)       ###
 ####################################################
-type_of_potential = no_potential
+type_of_potential = HO
 
 ####################################################
 ###    Parameters for HO potential of the form   ###
 ###             U(x) = 1/2*m*omega*x^2           ###
 ####################################################
-omega = 4          #Frequency of HO
+omega = 1         #Frequency of HO
 
-####################################################
-###    Parameters for DW potential of the form   ###
-###      U(x) = U_0*(x^2-1)^2                    ###
-####################################################
-#U_0 = 1.0
-#x0_dw = 1
 
 ####################################################
 ###        Parameters of the pair interaction    ###
@@ -60,8 +58,18 @@ omega = 4          #Frequency of HO
 lennard_jones_on = 1
 lj_epsilon = 1.0
 lj_sigma = 1.0
-lj_cutoff = 2.25
-lj_cap = 0.8
+lj_cutoff = 3.0
+#lj_cap = 0.8
+lj_cap = 0.0
+
+####################################################
+###        Parameters of the pair interaction    ###
+###        spring interaction           ###
+####################################################
+
+spring_on = 0
+spring_k = 1
+spring_l0 = 1.0
 
 ####################################################
 ####################################################
@@ -72,15 +80,15 @@ lj_cap = 0.8
 ####################################################
 ###         Parameters for path dynamics         ###
 ####################################################
-N_vertical = 10000   #Paths to generate
-vertical_dt = 0.000046            #Ficticious time
+N_vertical = 100000   #Paths to generate
+vertical_dt = 0.0001             #Ficticious time
 M = 1                       #Ficticious mass
 
 ####################################################
 ###      Thermostated path dynamics? (Y/N)       ###
 ####################################################
 thermostat = Y              #Thermostated? (Y/N)
-fict_gamma = 100.0         #Ficticious gamma
+fict_gamma = 0.0         #Ficticious gamma
 fict_k_T = 1.0         #Ficticious kT
 
 ####################################################
@@ -97,3 +105,5 @@ constraint_tolerance = 1e-6  #constraint tolerance
 ####################################################
 freq_output_horizontal = 1
 freq_output_vertical = 1
+
+time_check = 0
