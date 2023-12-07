@@ -1,30 +1,12 @@
 ####################################################
-####################################################
-### This is an input file for the following code ###
-###                  main.py                     ###
-###                                              ###
-###                Written by:                   ###
-###              Benjamin Fégeant                ###
-###                                              ###
-###            Autumn semester 2022              ###
-####################################################
+# Either do vertical or horizontal 
+# (can't do both at once)
 ####################################################
 
-####################################################
-### Do you wanna generate an initial path? (Y/N) ###
-####################################################
-generate_new_path = Y
-initialize_path_from_points_from_file = Y
-init_points_file = pdf_all_xmin_-1.2247_xmax_-0.7071.csv
-work_name = test     #Name the work (files will be named after the work name)
-path_point_frequency = 1 # change when not using every path point
-
-####################################################
-###      If you only wanna do path dynamics,     ###
-###        set generate_new_path = N and         ###
-###           provide input file below           ###
-####################################################
-input_work_name = test      #Give path of input file if N
+horizontal = 0
+vertical = 1
+restart_horizontal_from_file = 0
+restart_vertical_from_file = 0
 
 ####################################################
 ####################################################
@@ -33,33 +15,61 @@ input_work_name = test      #Give path of input file if N
 ####################################################
 
 ####################################################
+### Initializing with FCC lattice                ### 
+####################################################
+
+# Either with the number of atoms
+
+# Or with the number of cells density (make sure the LJ parameters are such that r_LJ = L / N_cells
+N_cells = 1 # will only be used if using FCC initialization (case of LJ particles)
+density = 0.807
+
+natoms = 2 # will be used if using HO potential (no LJ)
+
+init_FCC = 0
+
+####################################################
 ### Parameters for generating an initial path    ### 
 ###             with OVRVO-algorithm             ###
 ####################################################
-dt = 0.1         #Timestep of the path in base 10
-k_T = 0.05             #Temperature of system
-N = 101         #Number of timesteps
-theta = 1          #Saves every theta timestep 
-gamma = 1.0      #Friction coefficient (cant be zero if running path dynamics)
+horizontal_dt = 0.01         #Timestep of the path in base 10
+k_T = 1.0            #Temperature of system
+N_horizontal = 1001     #Number of timesteps
+gamma = 1.0
 m = 1               #mass of particle
 
 ####################################################
-###        Regarding the potential (HO/DW)       ###
+###        Regarding the external potential (HO/DW)       ###
 ####################################################
-type_of_potential = DW
+type_of_potential = HO
 
 ####################################################
 ###    Parameters for HO potential of the form   ###
 ###             U(x) = 1/2*m*omega*x^2           ###
 ####################################################
-omega = 10          #Frequency of HO
+omega = 1         #Frequency of HO
+
 
 ####################################################
-###    Parameters for DW potential of the form   ###
-###      U(x) = U_0*(x^2-1)^2                      ###
+###        Parameters of the pair interaction    ###
+###         Lennard-Jones interaction           ###
 ####################################################
-U_0 = 1.0
-#x0_dw = 1
+
+lennard_jones_on = 1
+lj_epsilon = 1.0
+lj_sigma = 1.0
+lj_cutoff = 3.0
+#lj_cap = 0.8
+lj_cap = 0.0
+
+####################################################
+###        Parameters of the pair interaction    ###
+###        spring interaction           ###
+####################################################
+
+spring_on = 0
+spring_k = 1
+spring_l0 = 1.0
 
 ####################################################
 ####################################################
@@ -68,28 +78,23 @@ U_0 = 1.0
 ####################################################
 
 ####################################################
-###     Do you wanna do path dynamics? (Y/N)     ###
-####################################################
-do_path_dynamics = Y
-
-####################################################
 ###         Parameters for path dynamics         ###
 ####################################################
-number_of_paths = 500000   #Paths to generate
-delta_t = 0.001            #Ficticious time
+N_vertical = 100000   #Paths to generate
+vertical_dt = 0.0001             #Ficticious time
 M = 1                       #Ficticious mass
 
 ####################################################
 ###      Thermostated path dynamics? (Y/N)       ###
 ####################################################
 thermostat = Y              #Thermostated? (Y/N)
-fict_gamma = 0.1         #Ficticious gamma
-fict_k_T = 0.1         #Ficticious kT
+fict_gamma = 0.0         #Ficticious gamma
+fict_k_T = 1.0         #Ficticious kT
 
 ####################################################
 ###      Constraining path dynamics? (Y/N)       ###
 ####################################################
-constraints = Y              #Constrained? (Y/N)
+constraints = N              #Constrained? (Y/N)
 shake = Y                    #use shake? (Y/N)
 rattle = Y                   #use_rattle? (Y/N)
 constraint_tolerance = 1e-6  #constraint tolerance
@@ -97,10 +102,8 @@ constraint_tolerance = 1e-6  #constraint tolerance
 ####################################################
 ###        How often should the following        ###
 ###             parameters be saved?             ###
-###                 1 = every path               ###
-###                   0 = never                  ###
 ####################################################
-save_Temp = 1000                    #Saving Temperature
-save_config = 1000                    #Saving configuration
-save_Ham = 1000                    #Saving Hamiltonian
-save_Obs = 1000                     #Saving observable
+freq_output_horizontal = 1
+freq_output_vertical = 1
+
+time_check = 0

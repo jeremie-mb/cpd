@@ -5,782 +5,1617 @@ import sys
 import csv
 import pandas as pd
 import time
+from numba import jit
+from numba import prange
 
-from mpi4py import MPI
-from mpi4py.futures import MPIPoolExecutor
+np.set_printoptions(precision=12, suppress = True)
 
 path = os.path.realpath(__file__)
 path = path.strip(os.path.basename(sys.argv[0]))
 
-global dt, k_T, N, theta, gamma, type_of_potential, omega, U_0, a, b, do_path_dynamics, number_of_paths, delta_t, M, thermostat, fict_gamma, save_temp_freq, save_pos_freq, save_vel_freq, save_Ham_freq, beta, fict_beta, fict_k_T, path_point_frequency, use_constraints, use_shake, use_rattle, constraint_tolerance
+'''
+A complete realization of a horizontal dynamic (self.horizontal_iter going from 0 to N_horizontal - 1) initializes self.X
+Each iteration of the vertical dynamic (self.vertical_iter += 1) updates self.X and self.PI 
+'''
+class Paths:
+    def __init__(self):
+        # Generalized coordinates each of dimensions (2, N_horizontal, N_atoms, 3) 
+        self.X = None # Generalized coordinates
+        self.PI = None # Generalized momenta
 
-class Path_of_particle:
-	def __init__(self, idp, pos_array, vel_array, Pi_array, dS_array, lambda_A, lambda_B, lambda_Bprime, obs_running_avg):
-		self.idp = idp
-		self.pos_array = pos_array
-		self.vel_array = vel_array
-		self.Pi_array = Pi_array
-		self.dS_array = dS_array
-		self.lambda_A = lambda_A
-		self.lambda_B = lambda_B
-		self.lambda_Bprime = lambda_Bprime
-		self.obs_running_avg = obs_running_avg
-		
-'''class Constrains:
-	def __init__(self, constraint_vector, grad_constraint_vector, lagrange_multipliers):
-		self.constraint_vector = constraint_vector
-		self.grad_constraint_vector = grad_constraint_vector
-		self.lagrange_multipliers = lagrange_multipliers'''
+        self.dS = None # (N_horizontal, N_atoms, 3)
+        self.force = None # (N_horizontal, N_atoms, 3)
+        self.force_jacobian = None # (N_horizontal, N_atoms, 3, 3)
+        self.force_divergence = None # (N_horizontal, N_atoms, 3)
 
-def initialize_path_dynamics():
-    print('Creating new initial trajectories')
-    if gamma != 0:
-        print('Thermostat on for real dynamics')
-    elif gamma == 0:
-        print('Thermostat off on for real dynamics')
-    
-    if rank == 0:
-        lambda_As = pd.read_csv(init_points_file)["lambda_A"].to_numpy()
-        print(lambda_As)
-        idsA = np.array([i for i in range(len(lambda_As))])
-        lambda_Bs = np.array([0.0]*len(lambda_As)) #np.linspace(0.7071,1.2247,len(lambda_As))
-        
-        lambda_As = np.array_split(lambda_As, size)
-        idsA = np.array_split(idsA, size)
-        lambda_Bs = np.array_split(lambda_Bs, size)
-        print(lambda_As)
-    else:
-        lambda_As = None
-        idsA = None
-        lambda_Bs = None
-    
-    lambda_As = comm.scatter(lambda_As, root=0)
-    lambda_Bs = comm.scatter(lambda_Bs, root=0)
-    idsA = comm.scatter(idsA, root=0)
-    
-    particle_array = []
-    for i in range(len(lambda_As)):    
-        lambda_Bprimes = np.linspace(0.7071,1.2247,100) #np.random.uniform(1.0, lambda_Bs[i], 100)#1000)
-        
-        for j in range(len(lambda_Bprimes)):
-            pos_array, vel_array = OVRVO(lambda_As[i])
-    
-            #writer_init_traj.writerows(np.c_[[i for l in range(len(pos_array))], [l*dt for l in range(len(pos_array))], pos_array, vel_array])
-      
-            Pi_x = np.random.normal(size=N, scale=np.sqrt(M*fict_k_T))
-            Pi_vx = np.random.normal(size=N, scale=np.sqrt(M*fict_k_T))
-    
-            #Pi_x -= np.sum(Pi_x)/len(Pi_x)
-            #Pi_vx -= np.sum(Pi_vx)/len(Pi_vx)
-    
-            Pi_pos = np.transpose(np.array([Pi_x, [0.0]*N, [0.0]*N]))
-            Pi_vel = np.transpose(np.array([Pi_vx, [0.0]*N, [0.0]*N]))
-    
-            #pos_array = np.transpose(np.array([data["x"], data["y"], data["z"]]))
-            #vel_array = np.transpose(np.array([data["vx"], data["vy"], data["vz"]]))
-            Pi_array = np.array([Pi_pos, Pi_vel])
-    
-            dS_array = get_dS_vector(pos_array, vel_array)
-    
-            p0 = Path_of_particle(idp=idsA[i]*len(lambda_Bprimes) + j, pos_array=pos_array,  vel_array=vel_array, Pi_array=Pi_array, dS_array=dS_array, lambda_A=lambda_As[i], lambda_B=lambda_Bs[i], lambda_Bprime=lambda_Bprimes[j], obs_running_avg=-dS_array[0,-1])
-        
-            particle_array.append(p0)
-    
-    particle_array_init_output = comm.gather(particle_array, root=0)
-    #args = (([i for i in range(len(init_x0s))], init_x0s["x0"]))
-    print(f"before::gamma: {gamma}")
+        # Iterators
+        self.initial_horizontal_iter = None
+        self.horizontal_iter = None # Goes from 0 to N_horizontal
+        self.vertical_iter = None # Goes from 0 to N_vertical
+        self.restart_N_vertical = None
 
-    ''''with MPIPoolExecutor() as executor:
-        particle_list_2 = list(executor.map(run_each_initial_path, [i for i in range(len(init_x0s))], init_x0s["x0"]))
-        #particle_list_2 = list(executor.map(run_each_initial_path, init_x0s["x0"]))'''
-    
-    if rank == 0:
-        particle_array_init_output = np.concatenate(particle_array_init_output)
-        init_traj_name = "init_trajectory.csv"
-        outfile_init_traj = open(init_traj_name, 'w')
-        writer_init_traj = csv.writer(outfile_init_traj)
-        header_init_traj = ["path_number", "path_id", "real_time", "x", "y", "z", "vx", "vy", "vz", "Pi_x", "Pi_y", "Pi_z", "Pi_vx", "Pi_vy", "Pi_vz"]
-        writer_init_traj.writerow(header_init_traj)
-        for part in particle_array_init_output:
-            #print(part.idp)
-            #print(len(part.pos_array))
-            #print(len(part.Pi_array[0]))
-            writer_init_traj.writerows(np.c_[[0.0]*len(part.pos_array), [part.idp]*len(part.pos_array), [l*dt for l in range(len(part.pos_array))], part.pos_array, part.vel_array, part.Pi_array[0], part.Pi_array[1]])
-    
-        outfile_init_traj.close()
-    print('Done with creating initial path')
-    
-    #particle_array = []
-    
-    return particle_array
-	
-def initialize_constraints(particle_array):#, grad_constraints_matrix, lagrange_multipliers):
-	lagrange_multipliers = np.array([[[0.0, 0.0], [0.0, 0.0]]]*len(particle_array))
-	rattle_multipliers = np.array([[[0.0, 0.0], [0.0, 0.0]]]*len(particle_array))
-	grad_constraints_matrix = []
-	'''for part in particle_array: 
-		grad_constraints_matrix_part = grad_constraint_vectors(part)
-		grad_constraints_matrix.append(grad_constraints_matrix_part)'''
-	#grad_constraints_matrix = grad_constraint_vectors(particle_array[0])
-	#print(f"initialize_constraints:: grad_constraints_matrix: {grad_constraints_matrix}")
-	print(f"len(grad_constraints_matrix): {len(grad_constraints_matrix)}, len(rattle_multipliers): {len(rattle_multipliers)}")
-	#print(f"len(grad_constraints_matrix[0]): {len(grad_constraints_matrix[0])}, len(rattle_multipliers): {len(rattle_multipliers)}")
-	return grad_constraints_matrix, lagrange_multipliers, rattle_multipliers
-	#return lagrange_multipliers, rattle_multipliers
-	
+        # Parameters
+        self.box_length = None # Returned by initialize_fcc_lattice() using the user-given density and number of cells 
 
-def OVRVO(x0_DW):
+        # Observables 
+        self.temperature_vector = None # contains the temperature averaged over atoms (of shape (N_horizontal))
+        self.temperature_mean = None # contains the temperature averaged over atoms and horizontal iterations (of shape 1) 
 
-    r_array = []
-    v_array = []
-    c1 = math.exp(-gamma*dt) # c1 = a in the Crooks article
-    if gamma == 0:
-        c2 = 1
-    else:
-        c2 = np.sqrt(2/(gamma*dt)*math.tanh(gamma*dt/2)) #c2 = b (the time rescaling fator) in the Crooks article
-    if type_of_potential =='HO':
-        x = np.random.normal(loc = 0.0, scale = np.sqrt((1./(m*omega**2))*k_T))
-    elif type_of_potential == 'DW':
-        x = x0_DW
-    v = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m))
-    t = 0.0
+        self.potential_energy_vector = None
+        self.potential_energy_mean = None
 
-    ### Solves the equations for the O-block ###
-    def O_block(v):
-        v_t_dt = np.sqrt(c1)*v + np.sqrt((1-c1)*k_T/m) * np.random.normal(0,1)
+        self.kinentic_energy_vector = None
+        self.kinentic_energy_mean = None
 
-        return v_t_dt
+        self.total_energy_vector = None
+        self.total_energy_mean = None
 
-    ### Solves the equations for the V-block ###
-    def V_block(x,v,F):
-        v_t_dt = v + 0.5*c2*dt*F/m #F is the force
+    def initialize_horizontal_dynamic(self):
+ 
+      global N_atoms, box_length, N_horizontal
 
-        return v_t_dt
 
-    ### Solves the equations for the R-block ###
-    def R_block(x,v):
-        x_t_dt = x + c2*dt*v
-        
-        return x_t_dt
+      if restart_horizontal_from_file:
+        # Read the csv file into a DataFrame
+        df = pd.read_csv('horizontal_trajectories.csv')
 
-    ### Calculates the force on the particle when in position x ###
-    def Force(x):
+        # Get the maximum horizontal_iter value, which corresponds to the last trajectories
+        last_horizontal_iter = df['horizontal_iter'].max()
+        N_atoms = df['atom_index'].max()
+
+        # Filter the DataFrame to only include the last trajectories
+        last_traj_df = df[df['horizontal_iter'] == last_horizontal_iter]
+
+        # Initialize self.X as a zero array
+        self.X = np.zeros((2, N_horizontal, N_atoms, 3))
+
+        self.horizontal_iter = 0
+        self.vertical_iter = 0
+
+        # Fill self.X with the data from the last trajectory
+        for idx, row in last_traj_df.iterrows():
+          atom_idx = int(row['atom_index']) - 1  # Adjust atom_index to 0-indexing
+          self.X[0, 0, atom_idx, :] = [row['x'], row['y'], row['z']]
+          self.X[1, 0, atom_idx, :] = [row['vx'], row['vy'], row['vz']]
+
+          if type_of_potential == 'no_potential' and lennard_jones_on:  
+            #_, _, N_atoms, box_length = initialize_fcc_lattice2(N_cells, density)
+            N_atoms = natoms
+            box_length = 100*lj_sigma
+            self.box_length = box_length
+          elif type_of_potential == 'no_potential' and spring_on:  
+            self.box_length = 100
+            box_length = 100
+            N_atoms = natoms
+          elif type_of_potential == 'HO':
+            self.box_length = 10*np.sqrt((1./(m*omega**2))*k_T)
+            box_length = 10*np.sqrt((1./(m*omega**2))*k_T)
+            N_atoms = natoms
+          else:
+            raise ValueError("No potential and no Lennard Jones")
+
+        self.kinetic_energy = np.zeros(N_horizontal)
+        self.potential_energy_vector = np.zeros(N_horizontal)
+        self.total_energy = np.zeros(N_horizontal)
+        print(f"Restarting horizontal dynamics from initial configuration with horizontal_iter = {last_horizontal_iter}\nNew N_horizontal = {N_horizontal}")
+      else: 
         if type_of_potential == 'HO':
-            F = -m*omega**2*x #Harmonic oscillator
-        elif type_of_potential == 'DW':
-            F = 4.0*U_0*x*(1.0 - x**2)
-            #F = -2*(U_0/(a**2*b**2))*((x-a)*(x-b)**2 + (x-a)**2*(x-b)) #Double well
+          if spring_on:
+            box_length = 10*np.sqrt((1./(m*omega**2))*k_T)
+            N_atoms = natoms
+            r = np.zeros((natoms, 3))
+            if natoms == 2:
+              r[0, :] = np.array([0.5,0.1,-0.1])
+              r[1, :] = np.array([-0.5,-0.1,0.1])
+            elif natoms == 3:
+              r[0, :] = np.array([0.5,0.0,0.0])
+              r[1, :] = np.array([-0.5,0.0,0.0])
+              r[2, :] = np.array([0.0,0.5,0.0])
+            else:
+              ValueError("spring_on only works with 2 or 3 atoms")
+            v = np.random.normal(loc = 0.0, scale = 0, size = 3*N_atoms).reshape(N_atoms, 3)
+          else:
+            box_length = 10*np.sqrt((1./(m*omega**2))*k_T)
+            N_atoms = natoms
+            r = np.random.normal(loc = 0.0, scale = np.sqrt((1./(m*omega**2))*k_T), size = 3*N_atoms).reshape(N_atoms,3)
+            v = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = 3*N_atoms).reshape(N_atoms, 3)
+        elif type_of_potential == 'no_potential':
+          if lennard_jones_on:
+            ''' 
+            Initialize with the number of cells and the size of the box
+            In this case, you can choose the density but make sure the LJ eq. distance
+            is the lattice spacing aka L / N_cells = r_LJ
+            '''
+            r_eq = (2**(1. /6 )) * lj_sigma 
+            if init_FCC:
+              r, lattice_spacing, N_atoms, box_length = initialize_fcc_lattice2(N_cells, density)
+            else: 
+              N_atoms = natoms
+              r = np.zeros((natoms, 3))
+              #_, _, _, box_length = initialize_fcc_lattice2(N_cells, density)
+              box_length = 100*lj_sigma
+              if natoms == 2:
+                #r[0, :] = np.array([0.5*r_eq,0.0,0.0])
+                #r[1, :] = np.array([-0.5*r_eq,0.0,0.0])
+                r[0, :] = np.array([0.5*r_eq,0.1*r_eq,0.0])
+                r[1, :] = np.array([-0.5*r_eq,0.0,-0.1*r_eq])
+              elif natoms == 3:
+                r[0, :] = np.array([0.5*r_eq,0.0,0.0])
+                r[1, :] = np.array([-0.5*r_eq,0.0,0.0])
+                r[2, :] = np.array([0.0,0.5*r_eq,0.0])
+              else:
+                ValueError("spring_on only works with 2 or 3 atoms")
+              
+            if init_FCC:
+              print(f"You asked for N_cells = {N_cells} and density = {density}. \nInitializing {N_atoms} in {N_cells} FCC cells in a box of dimension {box_length}.")
+              print(f"LJ equilibrium distance is {r_eq} and nearest FCC distance is {lattice_spacing / np.sqrt(2)}")
+            else:
+              print(f"Initializing {N_atoms} atoms without FCC")
 
-        return F
+            ''' Velocities drawn from Boltzmann dist '''
+            #np.random.seed(0)
+            #v = np.random.normal(loc = 0.0, scale = 0., size = 3*N_atoms).reshape(N_atoms, 3)
+            vx = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = N_atoms)
+            vy = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = N_atoms)
+            vz = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = N_atoms)
+            v = np.transpose([vx, vy, vz])
+            v -= np.mean(v, axis = 0)
+          elif spring_on:
+            N_atoms = natoms
+            r = np.zeros((natoms, 3))
+            box_length = 10*spring_l0
+            if natoms == 2:
+              #r[0, :] = np.array([0.5,0.1,0.1])
+              #r[1, :] = np.array([-0.5,-0.1,-0.1])
+              r[0, :] = np.array([0.5,0.0,0.0])
+              r[1, :] = np.array([-0.5,0.0,0.0])
+            elif natoms == 3:
+              r[0, :] = np.array([0.5,0.0,0.0])
+              r[1, :] = np.array([-0.5,0.0,0.0])
+              r[2, :] = np.array([0.0,0.5,0.0])
+            else:
+              ValueError("spring_on only works with 2 or 3 atoms")
+            vx = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = N_atoms)
+            vy = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = N_atoms)
+            vz = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = N_atoms)
+            v = np.transpose([vx, vy, vz])
+            v -= np.mean(v, axis = 0)
+          else:
+            raise ValueError("No potential and no pair interaction: free particle???")
 
-    force = Force(x)
-    r_array.append(np.array([x, 0.0, 0.0]))
-    v_array.append(np.array([v, 0.0, 0.0]))
-    for i in range(1,N):
-        ### OVRVO ###
-        v = O_block(v)
-        v = V_block(x,v,force)
-        x = R_block(x,v)
-        force = Force(x) #Only one force evaluation per timestep
-        v = V_block(x,v,force)
-        v = O_block(v)
+        self.initial_horizontal_iter = 0
+        self.horizontal_iter = 0
+        self.vertical_iter = 0
+        self.X = np.zeros((2, N_horizontal, N_atoms, 3))
+        self.kinetic_energy = np.zeros(N_horizontal)
+        self.potential_energy_vector = np.zeros(N_horizontal)
+        self.total_energy = np.zeros(N_horizontal)
 
-        ### Saving the position and velocity in a .txt file ###
-        if i%theta == 0:
-            r_array.append(np.array([x, 0.0, 0.0]))
-            v_array.append(np.array([v, 0.0, 0.0]))
-            #output_traj.write(str(x) + " " + str(v) + " \n")
+        self.X[0, 0, :, :] = r
+        self.X[1, 0, :, :] = v
+
+        self.box_length = box_length
+    
+        print('Done with the initialization')
+
+    def OVRVO(self):
+      
+      '''
+      Carries out OVRVO from initial positions self.X[0, 0, ...] and initial velocities self.X[1, 0, ...] 
+      Each timestep evolves all atoms 
+      Force is calculated from get_force() method once per timestep
+      '''
+      c1 = math.exp(-gamma*horizontal_dt) # c1 = a in the Crooks article
+      if gamma == 0:
+        c2 = 1 #c2 = b (the time rescaling fator) in the Crooks article
+      else:
+        c2 = np.sqrt(2/(gamma*horizontal_dt)*math.tanh(gamma*horizontal_dt/2))
+
+      r = self.X[0, 0, ...]
+      v = self.X[1, 0, ...]
+
+      print(f"Starting OVRVO algorithm from horizontal_iter = {self.horizontal_iter} to {N_horizontal}")
+
+      force_value = self.get_force_OVRVO() # (N_horizontal, N_atoms, 3)
+
+      while self.horizontal_iter < N_horizontal - 1:
+
+        self.horizontal_iter += 1
+        if (self.horizontal_iter % freq_output_horizontal == 0): print(self.horizontal_iter)
+
+        # O-block
+        v = np.sqrt(c1)*v + np.sqrt((1-c1)*k_T/m) * np.random.normal(0,1,3*N_atoms).reshape((N_atoms, 3))
+  
+        # V-block
+        v = v + 0.5*c2*horizontal_dt*force_value/m
+
+        # R-block
+        r = r + c2*horizontal_dt*v
+
+        self.X[0, self.horizontal_iter, ...] = r
+        self.X[1, self.horizontal_iter, ...] = v
+ 
+        force_value = self.get_force_OVRVO()
+ 
+        # V-block
+
+        v = v + 0.5*c2*horizontal_dt*force_value/m
+
+        # O-block
+        v = np.sqrt(c1)*v + np.sqrt((1-c1)*k_T/m) * np.random.normal(0,1,3*N_atoms).reshape((N_atoms, 3))
+
+        self.X[0, self.horizontal_iter, :, :] = r
+        self.X[1, self.horizontal_iter, :, :] = v
+
+      return 0
+
+
+    def write_horizontal(self):
+
+      write_mode = 'a' if self.vertical_iter > 0 else 'w' # Overwrite if files already exists
+      first_line = not(os.path.exists("horizontal_trajectories.csv") and self.vertical_iter > 0)
+      
+      if restart_horizontal_from_file:
+        filename = "new_horizontal_trajectories.csv"
+      else:
+        filename = "horizontal_trajectories.csv"
+
+      with open(filename, write_mode) as outfile_traj:
+        if first_line:
+          outfile_traj.write(",".join(["vertical_iter", "horizontal_iter", "atom_index", "x", "y", "z", "vx", "vy", "vz"]) + "\n")
+
+          for hor in range(N_horizontal):  
+            if hor % freq_output_horizontal == 0: 
+              for atom_idx in range(1, N_atoms+1): 
+                vx, vy, vz = [f'{self.X[1, hor, atom_idx -1, i]:12.8g}' for i in range(3)]
+                
+                dx = self.X[0, hor, atom_idx - 1, 0] 
+                dy = self.X[0, hor, atom_idx - 1, 1] 
+                dz = self.X[0, hor, atom_idx - 1, 2] 
+
+                #dx = dx - self.box_length * np.round( dx / self.box_length)
+                #dy = dy - self.box_length * np.round( dy / self.box_length)
+                #dz = dz - self.box_length * np.round( dz / self.box_length)
+
+                # Write folded positions
+                x, y, z = [f"{alpha:12.8g}" for alpha in [dx, dy, dz]]
+
+                row = [str(self.vertical_iter), str(hor), str(atom_idx), x, y, z, vx, vy, vz]
+                outfile_traj.write(",".join(row) + "\n")
+
+
+      if restart_horizontal_from_file:
+        filename = "new_horizontal_observables.csv"
+      else:
+        filename = "horizontal_observables.csv"
+
+      self.get_kinetic_energy_vector()
+      self.get_potential_energy_vector()
+      self.get_total_energy_vector()
+      temperatures = self.get_temperature_vector()
+
+      first_line = not(os.path.exists(filename) and self.vertical_iter > 0)
+      with open(filename, write_mode) as outfile_traj:
+        if first_line:
+          outfile_traj.write(",".join(["vertical_iter", "horizontal_iter", "temperature", "kinetic_energy", "potential_energy", "total_energy"]) + "\n")
+        rows = zip([str(self.vertical_iter)]*N_horizontal,
+               [f'{int(alpha)}' for alpha in range(N_horizontal) if alpha % freq_output_horizontal == 0],
+               [f'{temperatures[int(alpha)]}' for alpha in range(N_horizontal) if alpha % freq_output_horizontal == 0],
+               [f'{self.kinetic_energy_vector[alpha]}' for alpha in range(N_horizontal) if alpha % freq_output_horizontal == 0],
+               [f'{self.potential_energy_vector[alpha]}' for alpha in range(N_horizontal) if alpha % freq_output_horizontal == 0],
+               [f'{self.total_energy_vector[alpha]}' for alpha in range(N_horizontal) if alpha % freq_output_horizontal == 0])
+        for row in rows:
+          outfile_traj.write(",".join(row) + "\n")
+ 
+
+    def write_vertical(self):
+
+      if restart_vertical_from_file == 0: write_mode = 'a' if self.vertical_iter > 0 else 'w'
+      else: write_mode = 'a' 
+
+      with open("vertical_trajectories.csv", write_mode) as outfile_traj:
+
+        if self.vertical_iter == 0: 
+          outfile_traj.write(",".join(["vertical_iter", "horizontal_iter", "atom_index", "x", "y", "z", "vx", "vy", "vz", "pix", "piy", "piz", "pivx", "pivy", "pivz"]) + "\n")
+        for hor in range(N_horizontal):
+          if hor % freq_output_horizontal == 0:  
+            for atom_idx in range(1, N_atoms+1): 
+              x, y, z = [f'{self.X[0, hor, atom_idx -1, i]:.5f}' for i in range(3)]  
+              vx, vy, vz = [f'{self.X[1, hor, atom_idx -1, i]:.5f}' for i in range(3)] 
+                        
+              pix, piy, piz = [f'{self.PI[0, hor, atom_idx -1, i]:.5f}' for i in range(3)]  
+              pivx, pivy, pivz = [f'{self.PI[1, hor, atom_idx -1, i]:.5f}' for i in range(3)] 
+
+              row = [str(self.vertical_iter), str(hor), str(atom_idx), x, y, z, vx, vy, vz, pix, piy, piz, pivx, pivy, pivz]
+              outfile_traj.write(",".join(row) + "\n")
+
+
+      self.get_kinetic_energy_vector()
+      self.get_potential_energy_vector()
+      self.get_total_energy_vector()
+      temperatures = self.get_temperature_vector()
+
+      with open("vertical_observables.csv", write_mode) as outfile_traj:
+
+        if self.vertical_iter == 0: 
+          outfile_traj.write(",".join(["vertical_iter", "horizontal_iter", "temperature", "kinetic_energy", "potential_energy", "total_energy"]) + "\n")
+        rows = zip([str(self.vertical_iter) for _ in range(N_horizontal)], 
+                   [f'{alpha}' for alpha in range(int(N_horizontal))],
+                   [f'{temperatures[int(alpha)]}' for alpha in range(N_horizontal)],
+                   [f'{self.kinetic_energy_vector[alpha]}' for alpha in range(N_horizontal)],
+                   [f'{self.potential_energy_vector[alpha]}' for alpha in range(N_horizontal)],
+                   [f'{self.total_energy_vector[alpha]}' for alpha in range(N_horizontal)])
+ 
+        for row in rows:
+          outfile_traj.write(",".join(row) + "\n")
+
+
+      self.get_kinetic_energy_mean()
+      self.get_potential_energy_mean()
+      self.get_total_energy_mean()
+      temperature = self.get_temperature_mean()
+      fict_temperature = self.get_fictitious_temperature()
+      vertical_hamiltonian = self.get_vertical_hamiltonian()
+
+      with open("mean_vertical_observables.csv", write_mode) as outfile_traj:
+        if self.vertical_iter == 0:
+          outfile_traj.write(",".join(["vertical_iter", "temperature", "fict_temperature", "kinetic_energy", "potential_energy", "total_energy", "vertical_hamiltonian"]) + "\n")
+        rows = zip([str(self.vertical_iter)],
+                   [f'{temperature}'], 
+                   [f'{fict_temperature}'], 
+                   [f'{self.kinetic_energy_mean}'], 
+                   [f'{self.potential_energy_mean}'],
+                   [f'{self.total_energy_mean}'],
+                   [f'{self.vertical_hamiltonian}'])
+        for row in rows:
+          outfile_traj.write(",".join(row) + "\n")
+
+      print(f"{'Parameter':<25} | {'Value'}")
+      print(f"{'-'*25} | {'-'*20}")
+      print(f"{'Vertical Iter':<25} | {self.vertical_iter}")
+      print(f"{'Kinetic Energy Mean':<25} | {self.kinetic_energy_mean}")
+      print(f"{'Potential Energy Mean':<25} | {self.potential_energy_mean}")
+      print(f"{'Total Energy Mean':<25} | {self.total_energy_mean}")
+      print(f"{'Temperature Mean':<25} | {self.temperature_mean}")
+      print(f"{'Fictitious Temperature':<25} | {fict_temperature}")
+      print(f"{'Vertical Hamiltonian':<25} | {vertical_hamiltonian}")
+
+      return 0
+
+    def get_force_OVRVO(self):
+        if type_of_potential == 'HO':
+          external_force = -m*omega**2*self.X[0, self.horizontal_iter, ...]
+        elif type_of_potential == 'no_potential':
+          external_force = np.zeros_like(self.X[0, self.horizontal_iter, ...])
+        else:
+          raise ValueError("Unknown potential type")
+
+        if lennard_jones_on:
+          pair_force = self.LJ_force_OVRVO_image()
+          print(pair_force)
+        elif spring_on:
+          pair_force = self.spring_force_OVRVO() 
+        else:
+          pair_force = np.zeros_like(self.X[0, self.horizontal_iter, ...])
+
+        self.force = external_force + pair_force
+        return self.force
+
+
+    def LJ_force_OVRVO_image(self):
+      '''
+      At a given horizontal_iter, calculate the force and store the potential_energy
+      '''
+      force, self.potential_energy_vector[self.horizontal_iter] = LJ_compute_force_helper(self.X[0, self.horizontal_iter, ...], box_length)
+      return force
+
+    def spring_force_OVRVO(self):
+      '''
+      At a given horizontal_iter, calculate the force and store the potential_energy
+      '''
+      force, self.potential_energy_vector[self.horizontal_iter] = spring_compute_force_helper(self.X[0, self.horizontal_iter, ...], self.box_length)
+      return force
+
+
+
+    def initialize_vertical_dynamic(self):
+
+      global N_horizontal, N_atoms, box_length
+
+      if restart_vertical_from_file:
+        if not(os.path.exists("vertical_trajectories.csv")):
+          raise ValueError("Vertical dynamic cannot start without previous initial trajectories")
+
+        df = pd.read_csv('vertical_trajectories.csv')
+        N_vertical = df['vertical_iter'].max() + 1
+        N_horizontal = df['horizontal_iter'].max() + 1
+        N_atoms = df['atom_index'].max()  
+        self.X = np.zeros((2, N_horizontal, N_atoms, 3))
+        self.PI = np.zeros((2, N_horizontal, N_atoms, 3))
+        self.vertical_iter = N_vertical 
+        self.restart_N_vertical = N_vertical
             
-    return np.array(r_array), np.array(v_array)
-            
+        self.kinetic_energy = np.zeros(N_horizontal)
+        self.potential_energy_vector = np.zeros(N_horizontal)
+        self.total_energy = np.zeros(N_horizontal)
 
-def f(r_n):
-    new_forces = np.array([[0.0, 0.0, 0.0]]*len(r_n))
-    new_forces[:,0] = 4.0*U_0*(1 - (r_n[:,0]**2 + r_n[:,1]**2 + r_n[:,2]**2))*r_n[:,0] #-4/3*(4.0*r_n[:,0]**3 + 5.0*r_n[:,0]*r_n[:,1]**2 - 5.0*r_n[:,0])
-    return new_forces
+        _, _, _, box_length = initialize_fcc_lattice(N_cells, density)
+        self.box_length = box_length
 
-def f_prime(r_n):
-    new_force_derivatives = np.array([np.zeros((3,3))]*len(r_n))
-    new_force_derivatives[:,0,0] = 4.0*U_0*(1.0 - 3.0*r_n[:,0]**2)
-    return new_force_derivatives
-
-def f_div(r_n):    
-    return 4.0*U_0*(1.0 - 3.0*r_n[:,0]**2) #for 1D, for 2D 2*..., for 3D 3*...
-
-def get_dS_vector(pos,vel):
-    forces = f(pos)
-    grad_forces = f_prime(pos)
-    
-    a = np.exp(-gamma*dt)
-    b = np.sqrt(2/(gamma*dt)*math.tanh(gamma*dt/2))
-    dS_n = [beta*m/((1-a)*fict_beta) * (\
-        (1+a)/(b*dt)**2 * (2*pos[1:-1] - pos[2:] - pos[:-2])\
-        + (1/(2*m))*((1+a)*forces[1:-1]-forces[:-2]-a*forces[2:])\
-        + np.einsum('...ij,...j', grad_forces[1:-1], (1/(2*m)) * ((1+a)*pos[1:-1] - a*pos[:-2]-pos[2:]))\
-        + np.einsum('...ij,...j', grad_forces[1:-1], ((b*dt)/(2*m))**2 * (1+a) * forces[1:-1])\
-        + np.sqrt(a)/(b*dt)*(vel[2:]-vel[:-2])),\
-        beta*m/((1-a)*fict_beta) * ((1+a) * vel[1:-1] + np.sqrt(a)/(b*dt) * (pos[:-2]-pos[2:]))]
+        # Fill self.X and self.PI with the data from the last trajectory
+        for idx, row in df.iterrows():
+          atom_idx = int(row['atom_index']) - 1  # Adjust atom_index to 0-indexing
+          horizontal_iter = int(row['horizontal_iter'])  
         
-    dS_r_0 = -beta * forces[0]/fict_beta + (beta*m/((1-a)*fict_beta)) * (\
-        -(1+a)/(b*dt)**2 *(pos[1]-pos[0])\
-        - (1/(2*m))*(a*forces[1]-forces[0]) \
-        + np.sqrt(a)/(b*dt) * (vel[1] + vel[0]) \
-        - 1/(2*m) * np.dot(grad_forces[0], pos[1] - pos[0])\
-        + np.sqrt(a)*b*dt/(2*m) * np.dot(grad_forces[0], vel[0])\
-        + (b*dt)**2/(2*m)**2 * np.dot(grad_forces[0], forces[0]))
-    
-    dS_v_0 = beta*m*vel[0]/fict_beta + beta*m/((1-a)*fict_beta) * np.sqrt(a) * (-(pos[1]-pos[0]) / (b*dt) + b*dt/2 * forces[0]/m + np.sqrt(a)*vel[0])
+          self.X[0, horizontal_iter, atom_idx, :] = [row['x'], row['y'], row['z']]
+          self.X[1, horizontal_iter, atom_idx, :] = [row['vx'], row['vy'], row['vz']]
 
-    dS_r_N = beta*m/((1-a)*fict_beta) * (\
-        (1+a)/(b*dt)**2 * (pos[-1]-pos[-2])\
-        + (1/(2*m))*(a*forces[-1]-forces[-2]) \
-        - np.sqrt(a)/(b*dt) * (vel[-1] + vel[-2]) \
-        + (a/(2*m)) * np.dot(grad_forces[-1], pos[-1] - pos[-2])\
-        + (b*dt)**2/(2*m)**2 * a * np.dot(grad_forces[-1], forces[-1])\
-        - np.sqrt(a)*b*dt/(2*m)* np.dot(grad_forces[-1], vel[-1]))
+          self.PI[0, horizontal_iter, atom_idx, :] = [row['pix'], row['piy'], row['piz']]
+          self.PI[1, horizontal_iter, atom_idx, :] = [row['pivx'], row['pivy'], row['pivz']]
+      
+        self.get_dS()
+      else:
+        if not(os.path.exists("new_horizontal_trajectories.csv")):
+          raise ValueError("Vertical dynamic cannot start without initial horizontal path")
+
+        # Read the csv file into a DataFrame
+        df = pd.read_csv('new_horizontal_trajectories.csv')
+
+        if df['horizontal_iter'].max() + 1 !=  N_horizontal:
+          raise ValueError("new_horizontal_trajectories.csv has a different number of trajectories than N_horizontal")
+        N_atoms = df['atom_index'].max()  
+
+        # Initialize self.X as a zero array
+        self.X = np.zeros((2, N_horizontal, N_atoms, 3))
+
+
+        if type_of_potential == 'no_potential' and lennard_jones_on:  
+            _, _, _, _ = initialize_fcc_lattice2(N_cells, density)
+            N_atoms = natoms
+            box_length = 100*lj_sigma
+            self.box_length = box_length
+        elif type_of_potential == 'no_potential' and spring_on:  
+            self.box_length = 100
+            box_length = 100
+            N_atoms = natoms
+        elif type_of_potential == 'HO':
+            self.box_length = 10*np.sqrt((1./(m*omega**2))*k_T)
+            box_length = 10*np.sqrt((1./(m*omega**2))*k_T)
+            N_atoms = natoms
+        else:
+            raise ValueError("No potential and no Lennard Jones")
+
+        # Fill self.X with the data from the last trajectory
+        for idx, row in df.iterrows():
+          atom_idx = int(row['atom_index']) - 1  # Adjust to 0-indexing
+          horizontal_iter = int(row['horizontal_iter'])  
         
-    
-    dS_v_N = beta*m/((1-a)*fict_beta) * (-np.sqrt(a) * ((pos[-1]-pos[-2]) / (b*dt) + b*dt/2 * forces[-1]/m) + vel[-1])
-    
-    dS_r_array = np.concatenate(([dS_r_0], dS_n[0], [dS_r_N]))
-    dS_v_array = np.concatenate(([dS_v_0], dS_n[1], [dS_v_N]))
-    
-    return np.array([dS_r_array, dS_v_array])
+          self.X[0, horizontal_iter, atom_idx, :] = [row['x'], row['y'], row['z']]
+          self.X[1, horizontal_iter, atom_idx, :] = [row['vx'], row['vy'], row['vz']]
 
-def get_S(pos,vel):
-    a = np.exp(-gamma*dt)
-    b = np.sqrt(2/(gamma*dt)*math.tanh(gamma*dt/2))
-    pot_0 = U_0*(1- pos[0][0]**2)**2
-    first_part = beta*(0.5*m*np.sum(vel[0]**2) + pot_0) + N*np.log(2*np.pi*(1-a)*b*dt/(m*beta))
+
+        self.PI = np.random.normal(size = 2*N_horizontal*N_atoms*3, scale = np.sqrt(M*fict_k_T)).reshape((2, N_horizontal, N_atoms, 3))
+
+        self.vertical_iter = 0
+        self.restart_N_vertical = 0
+
+        self.kinetic_energy = np.zeros(N_horizontal)
+        self.potential_energy_vector = np.zeros(N_horizontal)
+        self.total_energy = np.zeros(N_horizontal)
+
+        # Calculate dS
+        self.get_dS()
+
+      return 0
+
+    def BAOAB(self):
+
+      ''' 
+      dS is always available here
+      either calculated in the previous iteration of BAOAB or in the vertical initialization
+      '''
+      start_block = time.time()
+      # B block
+      self.PI -= self.dS*(vertical_dt/2)
+      end_block = time.time()
+      if time_check: print(f"b block1: {end_block - start_block}")
+
+      # A block
+      start_block = time.time()
+      self.X += self.PI*(vertical_dt/(2*M))
+      end_block = time.time()
+      if time_check: print(f"a block1: {end_block - start_block}")
+
+      # O block
+      start_block = time.time()
+      random_vector = np.random.multivariate_normal(mean = (0.0, 0.0, 0.0),\
+      cov = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], size = (2, N_horizontal, N_atoms))
+
+      if fict_gamma != 0.0:
+        self.PI *= math.exp(-fict_gamma*vertical_dt) 
+        self.PI += math.sqrt(fict_k_T * M * (1-math.exp(-2*fict_gamma*vertical_dt)))*random_vector
+      end_block = time.time()
+      if time_check: print(f"o block: {end_block - start_block}")
+
+      # A block
+      start_block = time.time()
+      self.X += self.PI*(vertical_dt/(2*M))
+      self.get_dS()
+      end_block = time.time()
+      if time_check: print(f"a2 block: {end_block - start_block}")
+
+      # B block
+      start_block = time.time()
+      self.PI -= self.dS*(vertical_dt/2)
+      end_block = time.time()
+      if time_check: print(f"b2 block: {end_block - start_block}")
+
+      return 0
+
+    def get_temperature_vector(self): 
+      '''
+      X.shape = (2, N_horizontal, N_atoms, 3). Mean over number of atoms and number of components. No constraints  
+      Returns a 1-dimensional array of size N_horizontal
+      '''
+      self.temperature_vector = (1./3)*np.sum(m*self.X[1]**2, axis = (1, 2))/self.X.shape[2] # size (2, N_horizontal, N_atoms, 3)
+      return self.temperature_vector 
+  
+    def get_temperature_mean(self): 
+      '''
+      X.shape = (2, N_horizontal, N_atoms, 3). Mean over path (real time, number of atoms and number of components). No constraints  
+      Returns a float
+      '''
+      self.temperature_mean = (1./3)*np.sum(m*self.X[1]**2, axis = (0, 1, 2))/(self.X.shape[1]*self.X.shape[2]) 
+      return self.temperature_mean
+
+    def get_fictitious_temperature(self): 
+      ''' 
+      PI.shape = (2, N_vertical, 2*N_atoms, 3)
+      Mean over real time, number of fictious atoms, and components
+      '''
+      return (1./3)*np.sum(self.PI[1]**2/M)/(self.PI.shape[1]*self.PI.shape[2]) # PI.shape = (2, N_vertical, 2*N_atoms, 3)
+
+    def get_kinetic_energy_vector(self):
+      self.kinetic_energy_vector = 0.5*m*np.sum(self.X[1, ...]**2, axis = (1,2))
+      return self.kinetic_energy_vector
+
+    def get_kinetic_energy_mean(self):
+      self.kinetic_energy_mean = 0.5*m*np.sum(self.X[1, ...]**2, axis = (0,1,2))/N_horizontal
+      return self.kinetic_energy_mean
+ 
+    def get_total_energy_vector(self):
+      self.total_energy_vector = self.kinetic_energy_vector + self.potential_energy_vector
+      return self.total_energy_vector
+
+    def get_total_energy_mean(self):
+      self.total_energy_mean = self.kinetic_energy_mean + self.potential_energy_mean
+      return self.total_energy_mean
+
+    def get_potential_energy_vector(self):
+      self.potential_energy_vector = compute_potential_energy_helper(self.X, self.box_length)
+      return self.potential_energy_vector
+
+    def get_potential_energy_mean(self):
+      #if self.potential_energy_vector == None:
+      #  raise ValueError("Cannot calculate potential_energy_vector_mean before potential_energy_vector")
+      self.potential_energy_mean = np.mean(self.potential_energy_vector)
+      return self.potential_energy_mean
+ 
+    def get_force_divergence(self):    
+      if type_of_potential == 'HO': 
+        external_force_divergence = -3*m*omega**2
+      elif type_of_potential == 'no_potential':
+        external_force_divergence = 0
+
+      if lennard_jones_on == 1:
+        lj_force_divergence = LJ_force_divergence(self)
+      
+      return external_force_divergence + lj_force_divergence
+
+    def LJ_force_divergence(self):
+
+      traces_over_time = []
+      for jacobian_at_t in self.jacobians:
+        traces = [np.trace(jacobian) for jacobian in jacobian_at_t]
+        traces_over_time.append(traces)
+      return np.array(traces_over_time).reshape(N_horizontal, N_atoms)
+
+    def get_vertical_hamiltonian(self): # X is of size (2, N_horizontal, N_atoms, 3) 
+      self.S = get_S_helper(self.X, self.potential_energy_vector[0])
+      print(f"potential energy 0 = {self.potential_energy_vector[0]}")
+      print(f"self.S = {self.S}")
+      print(f"kinetic part = {np.sum(self.PI**2/M)}")
+      self.vertical_hamiltonian = self.S + np.sum(self.PI**2/(2*M))
+      return self.vertical_hamiltonian
+
+    def get_dS(self): # X is of size (2, N, N_atoms, 3) 
+      self.dS = get_dS_helper_manually2(self.X)
+      #self.dS = get_dS_helper_manually(self.X)
+      #quit()
+      return self.dS
+
+
+'''
+Below are all the functions which use numba for acceleration, and some utility functions 
+They rely on numba and so are outside the Paths class because numba works better with functions than with methods
+'''
+@jit(nopython=True)
+def BAOAB_force(X): # X[0] is of size (N_horizontal, N_atoms, 3)
+    force = np.zeros_like(X[0])
+    box_lengths = np.array([box_length, box_length, box_length])
+    if lennard_jones_on or spring_on:
+      for t in range(N_horizontal):
+        for i in range(N_atoms):
+            for j in range(i+1, N_atoms):
+                r_ij = X[0, t, j] - X[0, t, i]
+                
+                # Apply the minimum image convention
+                r_ij -= box_length * np.round(r_ij / box_length)
+                r_ij_norm = np.sqrt(np.sum(r_ij**2))  # Replaced np.linalg.norm
+
+                if r_ij_norm == 0:
+                    raise ValueError("r_ij_norm = 0")
+
+                if lennard_jones_on:
+                    if r_ij_norm > lj_cutoff:
+                        continue
+
+                    r_ij_inv = 1. / r_ij_norm
+                    lj_cutoff_inv = 1. / lj_cutoff
+
+                    # Compute the force magnitude according to the Lennard-Jones potential
+                    if r_ij_norm < lj_cap:
+                      lj_cap_inv = 1. / lj_cap
+                      # Capping the potential
+                      force_mag = 24*lj_epsilon*(2*lj_sigma**12 * lj_cap_inv**13 - lj_sigma**6 * lj_cap_inv**7)
+                      force_mag -= 24 * lj_epsilon * (2*lj_sigma**12*lj_cutoff_inv**13 - lj_sigma**6*lj_cutoff_inv**7)
+                    else:
+                      force_mag = 24 * lj_epsilon * (2*lj_sigma**12*r_ij_inv**13 - lj_sigma**6*r_ij_inv**7)
+                      force_mag -= 24 * lj_epsilon * (2*lj_sigma**12*lj_cutoff_inv**13 - lj_sigma**6*lj_cutoff_inv**7)
+
+                    # Add this force to the total force on both particles i and j
+                    # Note: the force on particle j is the negative of the force on particle i
+                    force_ij = force_mag * r_ij * r_ij_inv
+
+                    force[t, i] -= force_ij
+                    force[t, j] += force_ij
+
+                if spring_on:
+                  # Compute the force magnitude according to the spring potential
+                  force_mag = - spring_k*(r_ij_norm - spring_l0) 
+
+                  # Add this force to the total force on both particles i and j
+                  # Note: the force on particle j is the negative of the force on particle i
+                  force_ij = force_mag * r_ij
+
+                  force[i, :] -= force_ij
+                  force[j, :] += force_ij
+    return force
+
+@jit(nopython=True)
+def BAOAB_force_jacobian(X):
+
+    jacobians_over_time = np.zeros((N_horizontal, N_atoms, 3, 3))
+    box_lengths = np.array([box_length, box_length, box_length])
+    if lennard_jones_on or spring_on:
+
+        for t in range(N_horizontal):
+            for i in range(N_atoms):
+                # Calculate the Jacobian of the force F_i acting on atom i
+                for j in range(N_atoms):
+                    if j != i:
+                        r_ij = X[0, t, j] - X[0, t, i]
+                        # Apply the minimum image convention
+                        r_ij -= box_length * np.round(r_ij / box_length)
+                        r_ij_norm = np.sqrt(np.sum(r_ij**2))  # Replaced np.linalg.norm
+
+                        if r_ij_norm == 0:
+                          raise ValueError("r_ij = 0")
+
+                        if lennard_jones_on:
+                            if r_ij_norm > lj_cutoff:
+                              continue
+
+                            if r_ij_norm < lj_cap:
+                              A = 24*lj_epsilon*(lj_sigma**6 / lj_cap**7 - 2*lj_sigma**12 / lj_cap**13)
+
+                              for alpha in range(3):
+                                  delta_alpha = r_ij[alpha]
+                                  for beta in range(alpha, 3):
+                                      if alpha == beta:
+                                          result = A*r_ij_norm**(-1) - delta_alpha**2 * r_ij_norm**(-3)
+                                      else:
+                                          delta_beta = r_ij[beta]
+                                          result = - A * delta_alpha * delta_beta * r_ij_norm**(-3)
+
+                                      jacobians_over_time[t, i, alpha, beta] -= result
+                                      jacobians_over_time[t, i, beta, alpha] -= result
+                            else:
+                              lj_factor1 = 24 * lj_epsilon
+                              lj_factor2 = 2 * lj_sigma ** 12
+                              lj_factor3 = lj_sigma ** 6
+                              lj_factor4 = r_ij_norm ** (-16)
+                              lj_factor5 = r_ij_norm ** (-14)
+                              lj_factor6 = r_ij_norm ** (-10)
+                              lj_factor7 = r_ij_norm ** (-8)
+
+                              for alpha in range(3):
+                                  delta_alpha = r_ij[alpha]
+                                  for beta in range(alpha, 3):
+                                      if alpha == beta:
+                                        # Diagonal terms
+                                          result = lj_factor1 * delta_alpha * (lj_factor2 * (14 * delta_alpha ** 2 * lj_factor4 - lj_factor5) - lj_factor3 * (8 * delta_alpha ** 2 * lj_factor6 - lj_factor7))
+                                      else:
+                                          # Off-diagonal elements (symmetric)
+                                          delta_beta = r_ij[beta]
+                                          result = lj_factor1 * delta_alpha * delta_beta * (28 * lj_factor2 * lj_factor4 - 8 * lj_factor3 * lj_factor6)
+
+                                      jacobians_over_time[t, i, alpha, beta] -= result
+                                      jacobians_over_time[t, i, beta, alpha] -= result
+
+                        if spring_on:
+                              for alpha in range(3):
+                                  delta_alpha = r_ij[alpha]
+                                  for beta in range(alpha, 3):
+                                      if alpha == beta:
+                                          result = spring_k*(delta_alpha**2/r_ij_norm - r_ij_norm - spring_l0)
+                                      else:
+                                          delta_beta = r_ij[beta]
+                                          result = spring_k * delta_alpha * delta_beta / r_ij_norm
+
+                                      jacobians_over_time[t, i, alpha, beta] -= result
+                                      jacobians_over_time[t, i, beta, alpha] -= result
+    return jacobians_over_time
+
+
+def BAOAB_force_jacobian2(X):
+
+    jacobians_over_time = np.zeros((N_horizontal, N_atoms, N_atoms, 3, 3))
+    box_lengths = np.array([box_length, box_length, box_length])
+    if lennard_jones_on:
+        for t in range(N_horizontal):
+            for i in range(N_atoms):
+                for j in range(N_atoms):
+                    if j > i:
+                        r_ij = X[0, t, j] - X[0, t, i]
+                        # Apply the minimum image convention
+                        r_ij -= box_length * np.round(r_ij / box_length)
+                        r_ij_norm = np.sqrt(np.sum(r_ij**2))  # Replaced np.linalg.norm
+
+                        if r_ij_norm == 0:
+                          raise ValueError("r_ij = 0")
+
+                        if lennard_jones_on:
+                            if r_ij_norm > lj_cutoff:
+                              continue
+
+                            lj_factor1 = 24 * lj_epsilon
+                            lj_factor2 = 2 * lj_sigma ** 12
+                            lj_factor3 = lj_sigma ** 6
+                            lj_factor4 = r_ij_norm ** (-16)
+                            lj_factor5 = r_ij_norm ** (-14)
+                            lj_factor6 = r_ij_norm ** (-10)
+                            lj_factor7 = r_ij_norm ** (-8)
+
+                            for alpha in range(3):
+                                delta_alpha = r_ij[alpha]
+                                for beta in range(alpha, 3):
+                                    if alpha == beta:
+                                        # Diagonal terms
+                                        result = - lj_factor1 * (lj_factor2 * (14 * delta_alpha ** 2 * lj_factor4 - lj_factor5) - lj_factor3 * (8 * delta_alpha ** 2 * lj_factor6 - lj_factor7))
+
+                                        jacobians_over_time[t, i, i, alpha, alpha] += result
+
+                                        jacobians_over_time[t, i, j, alpha, alpha] = result
+
+                                        jacobians_over_time[t, j, i, alpha, alpha] = result
+                                    else:
+                                        # Off-diagonal elements (symmetric in i j and alpha beta)
+                                        delta_beta = r_ij[beta]
+                                        result = - lj_factor1 * delta_alpha * delta_beta * (14 * lj_factor2 * lj_factor4 - 8 * lj_factor3 * lj_factor6)
+
+                                        jacobians_over_time[t, i, i, alpha, beta] += result
+                                        jacobians_over_time[t, i, i, beta, alpha] += result
+
+                                        jacobians_over_time[t, i, j, alpha, beta] = result
+                                        jacobians_over_time[t, i, j, beta, alpha] = result
+
+                                        jacobians_over_time[t, j, i, alpha, beta] = result
+                                        jacobians_over_time[t, j, i, beta, alpha] = result
+
+    if spring_on:
+        for t in range(N_horizontal):
+            for i in range(N_atoms):
+                for j in range(N_atoms):
+                    if j > i:
+                        r_ij = X[0, t, j] - X[0, t, i]
+                        # Apply the minimum image convention
+                        r_ij -= box_length * np.round(r_ij / box_length)
+                        r_ij_norm = np.sqrt(np.sum(r_ij**2))  # Replaced np.linalg.norm
+
+                        if r_ij_norm == 0:
+                          raise ValueError("r_ij = 0")
+
+                        if lennard_jones_on:
+                            if r_ij_norm > lj_cutoff:
+                              continue
+
+                            for alpha in range(3):
+                                delta_alpha = r_ij[alpha]
+                                for beta in range(alpha, 3):
+                                    if alpha == beta:
+                                        # Diagonal terms
+                                        result = spring_k * ( 1 - spring_l0 * (delta_alpha / r_ij_norm**3) )
+                                        jacobians_over_time[t, i, i, alpha, alpha] += result
+
+                                        jacobians_over_time[t, i, j, alpha, alpha] = result
+
+                                        jacobians_over_time[t, j, i, alpha, alpha] = result
+                                    else:
+                                        # Off-diagonal elements (symmetric in i j and alpha beta)
+                                        delta_beta = r_ij[beta]
+                                        result = spring_k * spring_l0 * delta_alpha * delta_beta * (1. / r_ij_norm**2)
+                                        jacobians_over_time[t, i, i, alpha, beta] += result
+                                        jacobians_over_time[t, i, i, beta, alpha] += result
+
+                                        jacobians_over_time[t, i, j, alpha, beta] = result
+                                        jacobians_over_time[t, i, j, beta, alpha] = result
+
+                                        jacobians_over_time[t, j, i, alpha, beta] = result
+                                        jacobians_over_time[t, j, i, beta, alpha] = result
+ 
+    return jacobians_over_time
+
+
+
+@jit(nopython=True)
+def get_force(X):
+  if type_of_potential == 'HO':
+    external_force = -m*omega**2*X[0]
+  elif type_of_potential == 'no_potential':
+    external_force = np.zeros_like(X[0])
+  else:
+    raise ValueError("Unknown potential type")
+
+  pair_force = BAOAB_force(X)
+    
+  force = external_force + pair_force
+  return force
+
+#@jit(nopython=True)
+def get_force_jacobian(X): # of size (N_horizontal, N_atoms, 3 , 3)
+  # Take the Jacobian of the potential
+  external_force_jacobian = np.zeros((N_horizontal, N_atoms, 3, 3))
+  pair_force_jacobian = np.zeros((N_horizontal, N_atoms, 3, 3))
+  for t in range(N_horizontal):
+    for i in range(N_atoms):
+      for j in range(N_atoms):
+          # Take the Jacobian of the potential
+          if type_of_potential == 'HO':
+              external_force_jacobian[t, i, :, :] = -m * omega**2 * np.eye(3)
+          elif type_of_potential == 'no_potential':
+              external_force_jacobian[t, i, :, :] = np.zeros((3, 3))
+
+  #if type_of_potential == 'HO':
+  #  external_force_jacobian = np.tile(-m*omega**2 * np.eye(3), (N_horizontal, N_atoms, 1, 1))
+  #elif type_of_potential == 'no_potential':
+  #  external_force_jacobian = np.zeros((N_horizontal, N_atoms, 3, 3))
+
+  # Add the Jacobian of the pair interaction
+  pair_force_jacobian = BAOAB_force_jacobian(X)
+
+  total_force_jacobian = external_force_jacobian + pair_force_jacobian
+      
+  return total_force_jacobian
+
+
+#@jit(nopython=True)
+def get_force_jacobian2(X): # of size (N_horizontal, N_atoms, 3 , 3)
+  # Take the Jacobian of the potential
+  external_force_jacobian = np.zeros((N_horizontal, N_atoms, N_atoms, 3, 3))
+  pair_force_jacobian = np.zeros((N_horizontal, N_atoms, N_atoms, 3, 3))
+  for t in range(N_horizontal):
+    for i in range(N_atoms):
+      for j in range(N_atoms):
+          # Take the Jacobian of the potential
+          if type_of_potential == 'HO':
+              external_force_jacobian[t, i, i, :, :] = -m * omega**2 * np.eye(3)
+          elif type_of_potential == 'no_potential':
+              external_force_jacobian[t, i, j, :, :] = np.zeros((3, 3))
+
+  #if type_of_potential == 'HO':
+  #  external_force_jacobian = np.tile(-m*omega**2 * np.eye(3), (N_horizontal, N_atoms, 1, 1))
+  #elif type_of_potential == 'no_potential':
+  #  external_force_jacobian = np.zeros((N_horizontal, N_atoms, 3, 3))
+
+  # Add the Jacobian of the pair interaction
+  pair_force_jacobian = BAOAB_force_jacobian2(X)
+
+  total_force_jacobian = external_force_jacobian + pair_force_jacobian
+      
+  return total_force_jacobian
+
+#@jit(nopython=True)
+def get_dS_helper(X):
+  
+  start_block_time = time.time()
+  grad_forces = get_force_jacobian(X)
+  end_block_time = time.time()
+  if time_check: print(f"grad_forces: {end_block_time - start_block_time}")
+
+  start_block_time = time.time()
+  forces = get_force(X)
+  end_block_time = time.time()
+  if time_check: print(f"forces: {end_block_time - start_block_time}")
+  
+  a = np.exp(-gamma*horizontal_dt)
+  b = np.sqrt(2/(gamma*horizontal_dt)*math.tanh(gamma*horizontal_dt/2))
+
+  pos = X[0, ...]
+  vel = X[1, ...]
+
+  '''
+  dS of size (N, 3) in Jurij's code (1 atom) => now dS of size (N_horizontal, N_atoms, 3) for N_atoms atoms. 
+  Operations are vectorized on the first axis (keep in mind the numpy convention: axis = 0, 1, 2 etc...)
+  numba does not like np.einsum so only the get_force and get_force_jacobian are accelerated
+  '''
+
+  start_block_time = time.time()
+  dS_n = [beta*m/((1-a)*fict_beta) * (\
+    (1+a)/(b*horizontal_dt)**2 * (2*pos[1:-1] - pos[2:] - pos[:-2])\
+    + (1/(2*m))*((1+a)*forces[1:-1]-forces[:-2]-a*forces[2:])\
+    + np.einsum('...ij,...j', grad_forces[1:-1], (1/(2*m)) * ((1+a)*pos[1:-1] - a*pos[:-2]-pos[2:]))\
+    + np.einsum('...ij,...j', grad_forces[1:-1], ((b*horizontal_dt)/(2*m))**2 * (1+a) * forces[1:-1])\
+    + np.sqrt(a)/(b*horizontal_dt)*(vel[2:]-vel[:-2])),\
+    beta*m/((1-a)*fict_beta) * ((1+a) * vel[1:-1] + np.sqrt(a)/(b*horizontal_dt) * (pos[:-2]-pos[2:]))]
+  end_block_time = time.time()
+  if time_check: print(f"dS_n: {end_block_time - start_block_time}")
+
+  
+  start_block_time = time.time()
+  dS_r_0 = -beta * forces[0]/fict_beta + (beta*m/((1-a)*fict_beta)) * (\
+    -(1+a)/(b*horizontal_dt)**2 *(pos[1]-pos[0])\
+    - (1/(2*m))*(a*forces[1]-forces[0]) \
+    + np.sqrt(a)/(b*horizontal_dt) * (vel[1] + vel[0]) \
+    - 1/(2*m) * np.einsum('...ij,...j', grad_forces[0], pos[1] - pos[0])\
+    + np.sqrt(a)*b*horizontal_dt/(2*m) * np.einsum('...ij,...j', grad_forces[0], vel[0])\
+    + (b*horizontal_dt)**2/(2*m)**2 * np.einsum('...ij,...j', grad_forces[0], forces[0]))
+  end_block_time = time.time()
+  if time_check: print(f"dS_r_0: {end_block_time - start_block_time}")
+
+  start_block_time = time.time()
+  dS_v_0 = beta*m*vel[0]/fict_beta + beta*m/((1-a)*fict_beta) * np.sqrt(a) * (-(pos[1]-pos[0]) / (b*horizontal_dt) + b*horizontal_dt/2 * forces[0]/m + np.sqrt(a)*vel[0])
+  end_block_time = time.time()
+  if time_check: print(f"dS_v_0: {end_block_time - start_block_time}")
+
+  start_block_time = time.time()
+  dS_r_N =  beta*m/((1-a)*fict_beta) * (\
+    (1+a)/(b*horizontal_dt)**2 * (pos[-1]-pos[-2])\
+    + (1/(2*m))*(a*forces[-1]-forces[-2]) \
+    - np.sqrt(a)/(b*horizontal_dt) * (vel[-1] + vel[-2]) \
+    + (a/(2*m)) * np.einsum('...ij,...j', grad_forces[-1], pos[-1] - pos[-2])\
+    + (b*horizontal_dt)**2/(2*m)**2 * a * np.einsum('...ij,...j', grad_forces[-1], forces[-1])\
+    - np.sqrt(a)*b*horizontal_dt/(2*m)*np.einsum('...ij,...j', grad_forces[-1], vel[-1]))
+  end_block_time = time.time()
+  if time_check: print(f"dS_r_N: {end_block_time - start_block_time}")
+
+  start_block_time = time.time()
+  dS_v_N = beta*m/((1-a)*fict_beta) * (-np.sqrt(a) * ((pos[-1]-pos[-2]) / (b*horizontal_dt) + b*horizontal_dt/2 * forces[-1]/m) + vel[-1])
+  end_block_time = time.time()
+  if time_check: print(f"dS_v_N: {end_block_time - start_block_time}")
+
+  start_block_time = time.time()
+  dS_r_array = np.concatenate(([dS_r_0], dS_n[0], [dS_r_N]), axis=0)
+  dS_v_array = np.concatenate(([dS_v_0], dS_n[1], [dS_v_N]), axis=0)
+  end_block_time = time.time()
+  if time_check: print(f"concatenate: {end_block_time - start_block_time}")
+
+  return np.array([dS_r_array, dS_v_array])
+
+#@jit(nopython=True)
+def get_dS_helper_manually(X):
+  '''
+  Same as get_dS_helper() but not vectorized for checking (it yields same results)
+  '''
+
+  grad_forces = get_force_jacobian(X)
+  forces = get_force(X)
+
+  a = np.exp(-gamma*horizontal_dt)
+  b = np.sqrt(2/(gamma*horizontal_dt)*math.tanh(gamma*horizontal_dt/2))
+
+  pos = X[0, ...]
+  vel = X[1, ...]
+
+  dS_n, dS_r_0, dS_v_0, dS_r_N, dS_v_N, dS_r_array, dS_v_array, result = [], [], [], [], [], [], [], []
+  for i in range(N_atoms):
+    #print(np.einsum('...ij,...j', grad_forces[0, i], pos[1, i] - pos[0, i]))
+    #print(np.einsum('...ij,...j', grad_forces[0, i], forces[0, i]))
+    #print(np.einsum('...ij,...j', grad_forces[0, i], vel[0, i]))
+    #print(np.einsum('...ij,...j', grad_forces[-1, i], vel[-1, i]))
+    #print(np.einsum('...ij,...j', grad_forces[1:-1, i], ((1+a)*pos[1:-1, i] - a*pos[:-2, i]-pos[2:, i])))
+    #print(np.einsum('...ij,...j', grad_forces[1:-1, i], forces[1:-1, i]))
+
+    dS_n.append([beta*m/((1-a)*fict_beta) * (\
+    (1+a)/(b*horizontal_dt)**2 * (2*pos[1:-1, i] - pos[2:, i] - pos[:-2, i])\
+    + (1/(2*m))*((1+a)*forces[1:-1, i]-forces[:-2, i]-a*forces[2:, i])\
+    + np.einsum('...ij,...j', grad_forces[1:-1, i], (1/(2*m)) * ((1+a)*pos[1:-1, i] - a*pos[:-2, i]-pos[2:, i]))\
+    + np.einsum('...ij,...j', grad_forces[1:-1, i], ((b*horizontal_dt)/(2*m))**2 * (1+a) * forces[1:-1, i])\
+    + np.sqrt(a)/(b*horizontal_dt)*(vel[2:, i]-vel[:-2, i])),\
+    beta*m/((1-a)*fict_beta) * ((1+a) * vel[1:-1, i] + np.sqrt(a)/(b*horizontal_dt) * (pos[:-2, i]-pos[2:, i]))])
+
+  
+    dS_r_0.append(-beta * forces[0, i]/fict_beta + (beta*m/((1-a)*fict_beta)) * (\
+    -(1+a)/(b*horizontal_dt)**2 *(pos[1, i]-pos[0, i])\
+    - (1/(2*m))*(a*forces[1, i]-forces[0, i]) \
+    + np.sqrt(a)/(b*horizontal_dt) * (vel[1, i] + vel[0, i]) \
+    - 1/(2*m) * np.einsum('...ij,...j', grad_forces[0, i], pos[1, i] - pos[0, i])\
+    + np.sqrt(a)*b*horizontal_dt/(2*m) * np.einsum('...ij,...j', grad_forces[0, i], vel[0, i])\
+    + (b*horizontal_dt)**2/(2*m)**2 * np.einsum('...ij,...j', grad_forces[0, i], forces[0, i])))
+
+    dS_v_0.append(beta*m*vel[0, i]/fict_beta + beta*m/((1-a)*fict_beta) * np.sqrt(a) * (-(pos[1, i]-pos[0, i]) / (b*horizontal_dt) + b*horizontal_dt/2 * forces[0, i]/m + np.sqrt(a)*vel[0, i]))
+
+    dS_r_N.append(beta*m/((1-a)*fict_beta) * (\
+    (1+a)/(b*horizontal_dt)**2 * (pos[-1, i]-pos[-2, i])\
+    + (1/(2*m))*(a*forces[-1, i]-forces[-2, i]) \
+    - np.sqrt(a)/(b*horizontal_dt) * (vel[-1, i] + vel[-2, i]) \
+    + (a/(2*m)) * np.einsum('...ij,...j', grad_forces[-1, i], pos[-1, i] - pos[-2, i])\
+    + (b*horizontal_dt)**2/(2*m)**2 * a * np.einsum('...ij,...j', grad_forces[-1, i], forces[-1, i])\
+    - np.sqrt(a)*b*horizontal_dt/(2*m)*np.einsum('...ij,...j', grad_forces[-1, i], vel[-1, i])))
+
+    dS_v_N.append(beta*m/((1-a)*fict_beta) * (-np.sqrt(a) * ((pos[-1, i]-pos[-2, i]) / (b*horizontal_dt) + b*horizontal_dt/2 * forces[-1, i]/m) + vel[-1, i]))
+
+    dS_r_array.append(np.concatenate(([dS_r_0[i]], dS_n[i][0], [dS_r_N[i]]), axis=0))
+    dS_v_array.append(np.concatenate(([dS_v_0[i]], dS_n[i][1], [dS_v_N[i]]), axis=0))
+
+    result.append(np.array([dS_r_array[i], dS_v_array[i]]))
+
+  stacked_array = np.stack(result, axis=2)
+  #print(stacked_array.shape)
+  #print(stacked_array[1])
+
+  return stacked_array
+
+
+#@jit(nopython=True)
+def get_dS_helper_manually2(X):
+  '''
+  Same as get_dS_helper() but not vectorized for checking (it yields same results)
+  '''
+
+  # grad_forces size (N_horizontal, N_atoms, N_atoms, 3, 3)
+  # X size (N_horizontal, N_atoms, 3)
+
+  grad_forces = get_force_jacobian2(X)
+  forces = get_force(X)
+
+  R1 = np.zeros((N_horizontal, N_atoms, 3))
+  R2 = np.zeros((N_horizontal, N_atoms, 3))
+  R3 = np.zeros((N_atoms, 3))
+  R4 = np.zeros((N_atoms, 3))
+
+  a = np.exp(-gamma*horizontal_dt)
+  b = np.sqrt(2/(gamma*horizontal_dt)*math.tanh(gamma*horizontal_dt/2))
+
+  pos = X[0, ...]
+  vel = X[1, ...]
+
+  dS_n, dS_r_0, dS_v_0, dS_r_N, dS_v_N, dS_r_array, dS_v_array, result = [], [], [], [], [], [], [], []
+
+  for i in range(N_atoms):
+    for j in range(N_atoms):
+      R1[0, i] += np.dot(grad_forces[0, i, j], pos[1, j] - pos[0, j])
+      R1[-1, i] += np.dot(grad_forces[-1, i, j], pos[-1, j] - pos[-2, j])
+      R2[0, i] += np.dot(grad_forces[0, i, j], forces[0, j])
+      R2[-1, i] += np.dot(grad_forces[-1, i, j], forces[-1, j])
+      for t in range(1, len(grad_forces) - 1):
+        R1[t, i] += np.dot(grad_forces[t, i, j], (1+a)*pos[t, j] - a*pos[t-1, j] - pos[t+1, j])
+        R2[t, i] += np.dot(grad_forces[t, i, j], forces[t, j])
+      
+      #print(f"i = {i} R1 = {R1[:,i]}")
+      #print(f"i = {i} R2 = {R2[:,i]}")
+
+      #R1[:, i] += np.einsum('ijk,ik->ij', grad_forces[1:-1, i, j], (1+a)*pos[1:-1, i] - a*pos[:-2, i] - pos[2:, i])
+      #R2[:, i] += np.einsum('ijk,ik->ij', grad_forces[1:-1, i, j], (1+a)*pos[1:-1, i] - a*pos[:-2, i] - pos[2:, i])
+
+      #R2[1:-1, i] += np.dot(grad_forces[1:-1, i, j], forces[1:-1, i])
+
+      R3[i] += np.dot(grad_forces[0, i, j], vel[0, j])
+      R4[i] += np.dot(grad_forces[-1, i, j], vel[-1, j])
+  
+
+  for i in range(N_atoms):
+    #print(R2[1:-1,i])
+    dS_n.append([beta*m/((1-a)*fict_beta) * (\
+    (1+a)/(b*horizontal_dt)**2 * (2*pos[1:-1, i] - pos[2:, i] - pos[:-2, i])\
+    + (1/(2*m))*((1+a)*forces[1:-1, i]-forces[:-2, i]-a*forces[2:, i])\
+    + (1/(2*m)) * R1[1:-1, i] \
+    + ((b*horizontal_dt)/(2*m))**2 * (1+a) * R2[1:-1, i]\
+    + np.sqrt(a)/(b*horizontal_dt)*(vel[2:, i]-vel[:-2, i])),\
+    beta*m/((1-a)*fict_beta) * ((1+a) * vel[1:-1, i] + np.sqrt(a)/(b*horizontal_dt) * (pos[:-2, i]-pos[2:, i]))])
+
+
+    dS_r_0.append(-beta * forces[0, i]/fict_beta + (beta*m/((1-a)*fict_beta)) * (\
+    -(1+a)/(b*horizontal_dt)**2 *(pos[1, i]-pos[0, i])\
+    - (1/(2*m))*(a*forces[1, i]-forces[0, i]) \
+    + np.sqrt(a)/(b*horizontal_dt) * (vel[1, i] + vel[0, i]) \
+    - 1/(2*m) * R1[0, i]\
+    + np.sqrt(a)*b*horizontal_dt/(2*m) * R3[i]\
+    + (b*horizontal_dt)**2/(2*m)**2 * R2[0, i]))
+
+    dS_v_0.append(beta*m*vel[0, i]/fict_beta + beta*m/((1-a)*fict_beta) * np.sqrt(a) * (-(pos[1, i]-pos[0, i]) / (b*horizontal_dt) + b*horizontal_dt/2 * forces[0, i]/m + np.sqrt(a)*vel[0, i]))
+
+
+    dS_r_N.append(beta*m/((1-a)*fict_beta) * (\
+    (1+a)/(b*horizontal_dt)**2 * (pos[-1, i]-pos[-2, i])\
+    + (1/(2*m))*(a*forces[-1, i]-forces[-2, i]) \
+    - np.sqrt(a)/(b*horizontal_dt) * (vel[-1, i] + vel[-2, i]) \
+    + (a/(2*m)) * R1[-1, i] \
+    + (b*horizontal_dt)**2/(2*m)**2 * a * R2[-1, i]\
+    - np.sqrt(a)*b*horizontal_dt/(2*m)* R4[i]))
+
+    dS_v_N.append(beta*m/((1-a)*fict_beta) * (-np.sqrt(a) * ((pos[-1, i]-pos[-2, i]) / (b*horizontal_dt) + b*horizontal_dt/2 * forces[-1, i]/m) + vel[-1, i]))
+
+    dS_r_array.append(np.concatenate(([dS_r_0[i]], dS_n[i][0], [dS_r_N[i]]), axis=0))
+    dS_v_array.append(np.concatenate(([dS_v_0[i]], dS_n[i][1], [dS_v_N[i]]), axis=0))
+
+    result.append(np.array([dS_r_array[i], dS_v_array[i]]))
+
+  stacked_array = np.stack(result, axis=2)
+
+  #print(stacked_array.shape)
+  #print(stacked_array[1])
+
+  return stacked_array
+
+
+
+def get_S_helper(X, pot_0):
+
+    a = np.exp(-gamma*horizontal_dt)
+    b = np.sqrt(2/(gamma*horizontal_dt)*math.tanh(gamma*horizontal_dt/2))
+
+    forces = get_force(X)
+
+    # X of size (2, N_horizontal, N_atoms, 3)
+
+    pos = X[0, ...]
+    # pos of size (N_horizontal, N_atoms, 3)
+
+    vel = X[1, ...]
+    # vel of size (N_horizontal, N_atoms, 3)
+
+    first_part = beta*(0.5*m*np.sum(vel[0]**2) + pot_0) + N_horizontal*np.log(2*np.pi*(1-a)*b*horizontal_dt/(m*beta))
+
     sum_part = np.sum(beta*m/(2*(1-a)) * \
-    ((pos[1:]-pos[:-1])/(b*dt) - b*dt/2*f(pos[:-1])/m - np.sqrt(a)*vel[:-1])**2\
-    + (np.sqrt(a)* ( (pos[1:]-pos[:-1])/(b*dt) + b*dt/2*f(pos[1:])/m) - vel[1:])**2)
+    ((pos[1:]-pos[:-1])/(b*horizontal_dt) - b*horizontal_dt/2*forces[:-1]/m - np.sqrt(a)*vel[:-1])**2\
+    + (np.sqrt(a)* ( (pos[1:]-pos[:-1])/(b*horizontal_dt) + b*horizontal_dt/2*forces[1:]/m) - vel[1:])**2)
+
     return (first_part + sum_part)/fict_beta
 
 
-def write_to_file(name_of_variable, variable, path_number, writer, lagrange_multipliers=[], rattle_multipliers=[]):
-    variable_to_output = comm.gather(variable, root=0)
-    if name_of_variable == 'config':
-        lagrange_multipliers_to_output = comm.gather(lagrange_multipliers, root=0)
-        rattle_multipliers_to_output = comm.gather(rattle_multipliers, root=0)
-    if(rank == 0):
-        if name_of_variable == 'config':
-            variable_to_output = np.concatenate(variable_to_output)
-            lagrange_multipliers_to_output = np.concatenate(lagrange_multipliers_to_output)
-            rattle_multipliers_to_output = np.concatenate(rattle_multipliers_to_output)
-            index_pt = 0
-            for part in variable_to_output:
-                if(path_number % 10000 == 0): writer_traj.writerows(np.c_[[path_number]*len(part.pos_array), [part.idp]*len(part.pos_array), [l*dt for l in range(len(part.pos_array))], part.pos_array, part.vel_array])
-                observable = -part.dS_array[0,-1]
-                obs_running_avg = part.obs_running_avg
-                writer_obs.writerow([path_number, part.idp, part.lambda_A, part.lambda_B, part.lambda_Bprime, observable[0], observable[1], observable[2], obs_running_avg[0], obs_running_avg[1], obs_running_avg[2]])
-                
-                #print(f"len(lagrange_multipliers): {len(lagrange_multipliers)")
-                #index_pt = np.where(variable_to_output==part)
-                writer_multipliers.writerow([path_number, part.idp, lagrange_multipliers_to_output[index_pt][0,0], lagrange_multipliers_to_output[index_pt][0,1], rattle_multipliers_to_output[index_pt][0,0], rattle_multipliers_to_output[index_pt][0,1]])
-                index_pt += 1
-        elif name_of_variable == 'Temp':
-            variable_to_output = np.sum(variable_to_output, axis=0) 
-            writer_T.writerow([path_number, variable_to_output[0], variable_to_output[1], variable_to_output[2]])
-        elif name_of_variable == 'Ham':
-            writer_H.writerow([path_number, np.sum(variable_to_output)])    
+@jit(nopython=True)
+def spring_compute_force_helper(positions, box_length):
+      force = np.zeros_like(positions) # (N_atoms, 3)
+      box_lengths = np.array([box_length, box_length, box_length])
 
-def BAOAB(particle_array, lagrange_multipliers, rattle_multipliers, grad_constraints_matrix, path_number):
-    for part in particle_array:
-        ### B-block ###
-        #pos, vel = pos, vel
-        index_pt = particle_array.index(part)
-        part.Pi_array = part.Pi_array - part.dS_array*(delta_t/2)
+      potential_energy = 0
+      for i in range(N_atoms):
+        for j in range(i+1, N_atoms):
 
-        #grad_constraint_matrix_previous_step = get_grad_constraint_matrix_previous_step(part)
-        
-        ### A-block ###
-        part.pos_array = part.pos_array + part.Pi_array[0]*(delta_t/(2*M))
-        part.vel_array = part.vel_array + part.Pi_array[1]*(delta_t/(2*M))
+            r_ij = positions[j] - positions[i]
+            
+            # Apply the minimum image convention
+            r_ij -= box_lengths * np.round(r_ij / box_lengths)
 
-        ### O-block ###
-        #pos, vel = pos, vel
-        random_vector = np.random.multivariate_normal(mean = (0.0, 0.0, 0.0), cov = [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], size=(len(part.Pi_array), len(part.Pi_array[0])))
-        part.Pi_array = part.Pi_array*math.exp(-fict_gamma*delta_t)+math.sqrt(fict_k_T * M * (1-math.exp(-2*fict_gamma*delta_t)))*random_vector  #*np.random.normal(0,1)
-        
-        
-        ### A-block ###
-        part.pos_array = part.pos_array + part.Pi_array[0]*(delta_t/(2*M))
-        part.vel_array = part.vel_array + part.Pi_array[1]*(delta_t/(2*M))
-        
-        
-        if(use_constraints=='Y' and use_shake=='Y'): shake(part, lagrange_multipliers[index_pt], grad_constraints_matrix)#[index_pt])
+            r_ij_norm = np.sqrt(np.sum(r_ij**2))
 
-        part.dS_array = get_dS_vector(part.pos_array, part.vel_array) #Need to calculate the new force, so this one is needed. However this will be equal to the first dS in the next BAOAB step
-        part.obs_running_avg = part.obs_running_avg + (-part.dS_array[0,-1] - part.obs_running_avg)/(path_number+2)
-        ### B-block ###
-        #pos, vel = pos, vel
-        part.Pi_array = part.Pi_array - part.dS_array*(delta_t/2)
-        
-        if(use_constraints=='Y' and use_shake=='Y' and use_rattle=='Y'): rattle(part, rattle_multipliers[index_pt], grad_constraints_matrix)#[index_pt])
-        
-        #constraint
-        '''part.pos_array[0] = np.array([-1.0, 0.0, 0.0])
-        part.pos_array[len(part.pos_array)-1] = np.array([1.0, 0.0, 0.0])
-        part.vel_array[0] = np.array([0.0, 0.0, 0.0])
-        part.vel_array[len(part.pos_array)-1] = np.array([0.0, 0.0, 0.0])
-        
-        part.Pi_array[0,0] = np.array([0.0, 0.0, 0.0])
-        part.Pi_array[1,0] = np.array([0.0, 0.0, 0.0])
-        
-        part.Pi_array[0, len(part.pos_array)-1] = np.array([0.0, 0.0, 0.0])
-        part.Pi_array[1, len(part.pos_array)-1] = np.array([0.0, 0.0, 0.0])'''
+            if r_ij_norm == 0:
+                raise ValueError("r_ij_norm = 0")
 
-    #return pos, vel, Pi, dS
+            # Compute the force magnitude according to the spring potential
+            force_mag = - spring_k*(r_ij_norm - spring_l0) 
 
-def constraint_vector(particle): #must be changed with every chaange of constraints
-	sigma_vector_R = np.array([particle.pos_array[0,0] - particle.lambda_A, particle.pos_array[-1,0] - particle.lambda_Bprime])
-	sigma_vector_V = np.array([0.0, 0.0])#np.array([particle.vel_array[0,0] - 0.0, particle.vel_array[-1,0] - 0.0])
-	sigma_vector = np.array([sigma_vector_R, sigma_vector_V])
-	#np.array([[particle_array[0].pos_array[0] - np.array([-1.0, 0.0, 0.0]), particle_array[0].vel_array[0] - np.array([0.0, 0.0, 0.0])], [particle_array[0].pos_array[-1] - np.array([1.0, 0.0, 0.0]), particle_array[0].vel_array[-1] - np.array([0.0, 0.0, 0.0])]])
-	return sigma_vector
+            V_ij = 0.5*spring_k*(r_ij_norm - spring_l0)**2
 
-def grad_constraint_vectors(particle):
-	matrix_R = np.array([[[0.0, 0.0, 0.0]]*len(particle.pos_array), [[0.0, 0.0, 0.0]]*len(particle.pos_array)])
-	matrix_V = np.array([[[0.0, 0.0, 0.0]]*len(particle.vel_array), [[0.0, 0.0, 0.0]]*len(particle.vel_array)])
-	
-	matrix_R[0,0] = np.array([1.0, 0.0, 0.0])
-	matrix_R[-1,-1] = np.array([1.0, 0.0, 0.0])
-	
-	#matrix_V[0,0] = np.array([1.0, 0.0, 0.0])
-	#matrix_V[-1,-1] = np.array([1.0, 0.0, 0.0])
-	
-	return np.array([matrix_R, matrix_V])
+            potential_energy += V_ij
 
-	
-def shake(particle, multipliers, grad_constraints_matrix):
-	#print(f"SHAKING::constraint_tolerance: {constraint_tolerance}")
-	vector_of_constraints = constraint_vector(particle)
-	multipliers[0] = -vector_of_constraints[0]
-	particle.pos_array[0,0] += multipliers[0,0] 
-	particle.pos_array[-1,0] += multipliers[0,1]
-	particle.Pi_array[0][0,0] += multipliers[0,0]/delta_t
-	particle.Pi_array[0][-1,0] += multipliers[0,1]/delta_t
-	
-	'''grad_constraint_matrix_0 = np.copy(grad_constraints_matrix) #grad_constraint_matrix_previous_step
-	#print(f"grad_constraint_matrix_0: {grad_constraint_matrix_0}")
-	grad_constraint_matrix_R0 = grad_constraint_matrix_0[0].reshape(len(multipliers[0]), len(particle.pos_array)*3)
-	grad_constraint_matrix_R0_transposed = np.transpose(grad_constraint_matrix_R0)
-	
-	#grad_constraint_matrix_V0 = grad_constraint_matrix_0[1].reshape(len(multipliers[1]), len(particle.vel_array)*3)
-	#grad_constraint_matrix_V0_transposed = np.transpose(grad_constraint_matrix_V0)
-	
-	stop_iteration =  False
-	multipliers_increment = np.copy(multipliers)
-	while(stop_iteration == False):
-		
-		particle.pos_array += np.dot(grad_constraint_matrix_R0_transposed, multipliers_increment[0]).reshape(len(particle.pos_array), len(particle.pos_array[0]))
-		#particle.vel_array += np.dot(grad_constraint_matrix_V0_transposed, multipliers_increment[1]).reshape(len(particle.vel_array), len(particle.vel_array[0]))
-		
-		
-		grad_constraint_matrix_current = grad_constraint_vectors(particle)
-		grad_constraint_matrix_R_current = grad_constraint_matrix_current[0].reshape(len(multipliers[0]), len(particle.pos_array)*3)
-		#grad_constraint_matrix_V_current = grad_constraint_matrix_current[1].reshape(len(multipliers[1]), len(particle.vel_array)*3)
-		vector_of_constraints = constraint_vector(particle)
-		
-		
-		A_matrix_X = np.dot(grad_constraint_matrix_R_current, grad_constraint_matrix_R0_transposed)
-		#A_matrix_V = np.dot(grad_constraint_matrix_V_current, grad_constraint_matrix_V0_transposed)
-		
-		
-		multipliers_increment[0] = -np.dot(np.linalg.inv(A_matrix_X), vector_of_constraints[0])
-		
-		#multipliers_increment[1] = -np.dot(np.linalg.inv(A_matrix_V), vector_of_constraints[1])
-		
-		if(np.max(np.absolute(multipliers_increment)) < constraint_tolerance): 
-			stop_iteration = True
-			grad_constraints_matrix = grad_constraint_matrix_current
-		
-		multipliers += multipliers_increment
-		
-	particle.Pi_array[0] += np.dot(grad_constraint_matrix_R0_transposed, multipliers[0]).reshape(len(particle.pos_array), len(particle.pos_array[0]))/delta_t'''
+            # Add this force to the total force on both particles i and j
+            # Note: the force on particle j is the negative of the force on particle i
+            force_ij = force_mag * r_ij
+
+            force[i, :] -= force_ij
+            force[j, :] += force_ij
+
+      return force, potential_energy
 
 
-def rattle(particle, multipliers, grad_constraints_matrix):
-	#print(f"RATTLING::constraint_tolerance: {constraint_tolerance}")
-	multipliers[0,0] = -particle.Pi_array[0][0,0]
-	multipliers[0,1] = -particle.Pi_array[0][-1,0]
-	particle.Pi_array[0][0,0] += multipliers[0,0]
-	particle.Pi_array[0][-1,0] += multipliers[0,1]
-	
-	'''grad_constraint_matrix_0 = np.copy(grad_constraints_matrix) #grad_constraint_matrix_previous_step
-	#print(f"grad_constraint_matrix_0: {grad_constraint_matrix_0}")
-	grad_constraint_matrix_R0 = grad_constraint_matrix_0[0].reshape(len(multipliers[0]), len(particle.pos_array)*3)
-	grad_constraint_matrix_R0_transposed = np.transpose(grad_constraint_matrix_R0)
-	
-	#grad_constraint_matrix_V0 = grad_constraint_matrix_0[1].reshape(len(multipliers[1]), len(particle.vel_array)*3)
-	#grad_constraint_matrix_V0_transposed = np.transpose(grad_constraint_matrix_V0)
-	
-	A_matrix_X = np.dot(grad_constraint_matrix_R0, grad_constraint_matrix_R0_transposed)
-	#A_matrix_V = np.dot(grad_constraint_matrix_V0, grad_constraint_matrix_V0_transposed)
-	
-	inv_A_dot_grad_sigma_R0 = np.dot(np.linalg.inv(A_matrix_X), grad_constraint_matrix_R0)
-	#inv_A_dot_grad_sigma_V0 = np.dot(np.linalg.inv(A_matrix_V), grad_constraint_matrix_V0)
-	
-	multipliers[0] = -np.dot(inv_A_dot_grad_sigma_R0, particle.Pi_array[0].reshape(len(particle.pos_array)*3, 1)).reshape(1, len(multipliers[0]))
-	#multipliers[1] = -np.dot(inv_A_dot_grad_sigma_V0, particle.Pi_array[1].reshape(len(particle.vel_array)*3, 1)).reshape(1, len(multipliers[1]))
-	
-	
-	particle.Pi_array[0] += np.dot(grad_constraint_matrix_R0_transposed, multipliers[0]).reshape(len(particle.pos_array), len(particle.pos_array[0]))
-	#particle.Pi_array[1] += np.dot(grad_constraint_matrix_R0_transposed, multipliers[1]).reshape(len(particle.vel_array), len(particle.vel_array[0]))'''
-	
-	'''stop_iteration =  False
-	multipliers_increment = np.copy(multipliers)
-	while(stop_iteration == False):
-		
-		particle.Pi_array[0] += np.dot(grad_constraint_matrix_R0_transposed, multipliers_increment[0]).reshape(len(particle.pos_array), len(particle.pos_array[0]))
-		particle.Pi_array[1] += np.dot(grad_constraint_matrix_V0_transposed, multipliers_increment[1]).reshape(len(particle.vel_array), len(particle.vel_array[0]))
-		
-		
-		grad_constraint_matrix_current = grad_constraint_vectors(particle)
-		grad_constraint_matrix_R_current = grad_constraint_matrix_current[0].reshape(len(multipliers[0]), len(particle.pos_array)*3)
-		grad_constraint_matrix_V_current = grad_constraint_matrix_current[1].reshape(len(multipliers[1]), len(particle.vel_array)*3)
-		vector_of_constraints = constraint_vector(particle)
-		
-		
-		A_matrix_X = np.dot(grad_constraint_matrix_R_current, grad_constraint_matrix_R0_transposed)
-		A_matrix_V = np.dot(grad_constraint_matrix_V_current, grad_constraint_matrix_V0_transposed)
-		
-		
-		multipliers_increment[0] = -np.dot(np.linalg.inv(A_matrix_X), vector_of_constraints[0])
-		
-		multipliers_increment[1] = -np.dot(np.linalg.inv(A_matrix_V), vector_of_constraints[1])
-		
-		if(np.max(np.absolute(multipliers_increment)) < tolerance): 
-			stop_iteration = True
-			grad_constraints_matrix = grad_constraint_matrix_current
-		
-		multipliers += multipliers_increment'''
-		
-	#particle.Pi_array[0] += np.dot(grad_constraint_matrix_R0_transposed, multipliers[0]).reshape(len(particle.pos_array), len(particle.pos_array[0]))/delta_t
-	#particle.Pi_array[1] += np.dot(grad_constraint_matrix_V0_transposed, multipliers[1]).reshape(len(particle.vel_array), len(particle.vel_array[0]))/delta_t	
 
-def path_sampling(particle_array, lagrange_multiliers, rattle_multipliers, grad_constraints_matrix, writer_traj, writer_H, writer_T):
-    # beta = get_Temp(vel)**-1
-    #dS = get_dS_vector(pos,vel)
-    #Temp_real, Temp_fictitious, T_real_config, T_real_config_check = get_Temp(particle_array)
-    Temp_real, Temp_fictitious, T_real_config = get_Temp(particle_array)
-    Ham = get_Ham(particle_array)
-    #observable_array = get_observable(particle_array)
+@jit(nopython=True)
+def LJ_compute_force_helper(positions, box_length):
+      force = np.zeros_like(positions) # (N_atoms, 3)
+      box_lengths = np.array([box_length, box_length, box_length])
+      potential_energy = 0
+      for i in range(N_atoms):
+        for j in range(i+1, N_atoms):
 
-    for k in range(number_of_paths):
-        if save_config_freq != 0:
-            if k %save_config_freq == 0:
-                write_to_file('config', particle_array, k, writer_traj, lagrange_multiliers, rattle_multipliers)
-                print(f"saving config for path # {k}")
-        if save_Temp_freq != 0:
-            if k %save_Temp_freq == 0:
-                #write_to_file('Temp', [Temp_real, Temp_fictitious, T_real_config, T_real_config_check], k, writer_T)
-                write_to_file('Temp', [Temp_real, Temp_fictitious, T_real_config], k, writer_T)
-        if save_Ham_freq != 0:
-            if k %save_Ham_freq == 0:
-                write_to_file('Ham', Ham, k, writer_H)
-        '''if save_Obs_freq != 0:
-            if k %save_Obs_freq == 0:
-                write_to_file('Obs', observable_array, k, writer_obs)'''
-                #print(f"saving config for path # {k}")
-        #if((k+1)% 10 == 0 and tolerance > 10**-4): tolerance *= 0.5 
-        
-        BAOAB(particle_array, lagrange_multiliers, rattle_multipliers, grad_constraints_matrix, k)
-        #print(f"lagrange_multiliers: {lagrange_multiliers}")
-        #Temp_real, Temp_fictitious, T_real_config, T_real_config_check = get_Temp(particle_array)
-        Temp_real, Temp_fictitious, T_real_config = get_Temp(particle_array)
-        Ham = get_Ham(particle_array)
-        
-        if Ham == np.inf or Temp_real == np.inf or Temp_fictitious == np.inf:
-            print('The path exploded')
-            break
+            r_ij = positions[j] - positions[i]
+            
+            # Apply the minimum image convention
+            r_ij -= box_lengths * np.round(r_ij / box_lengths)
 
-def get_Temp(particle_array): #change for 3 d
-    T_real = 0.0
-    T_fict = 0.0
-    T_real_config = 0.0
-    #T_real_config_check = 0.0
-    for part in particle_array:
-    	T_real += np.sum(m*part.vel_array**2)/(N-2)
-    	T_fict += np.sum(part.Pi_array**2/M)/(2*N-2)
-    	T_real_config -= np.sum(f(part.pos_array[1:-1])**2)/np.sum(f_div(part.pos_array[1:-1]))
-    	#T_real_config_check += np.sum(m * omega**2 * part.pos_array**2)/N
-    	
-    	#print(T_real, T_fict, len(part.vel_array), len(part.Pi_array))
-    
-    return T_real/len(particle_array), T_fict/len(particle_array), T_real_config/len(particle_array) #, T_real_config_check/len(particle_array)
+            r_ij_norm = np.sqrt(np.sum(r_ij**2))
 
-def get_Ham(particle_array):
-    H = 0.0
-    for part in particle_array:
-        H += np.sum(part.Pi_array**2)/(2*M) + get_S(part.pos_array, part.vel_array)
-    return H
-    
-def get_observable(particle_array):
-    observable_array = []
-    for part in particle_array:
-        observable_array.append(-part.dS_array[0,-1])
-    return observable_array
+            if r_ij_norm == 0:
+                raise ValueError("r_ij_norm = 0")
+            if r_ij_norm > lj_cutoff:
+                continue
+
+            r_ij_inv = 1. / r_ij_norm
+            lj_cutoff_inv = 1. / lj_cutoff
+
+            # Compute the force magnitude according to the Lennard-Jones potential
+            force_mag = 24 * lj_epsilon * (2*lj_sigma**12*r_ij_inv**13 - lj_sigma**6*r_ij_inv**7)
+            force_mag -= 24 * lj_epsilon * (2*lj_sigma**12*lj_cutoff_inv**13 - lj_sigma**6*lj_cutoff_inv**7)
+
+            V_ij = 4 * lj_epsilon * ((lj_sigma*r_ij_inv)**12 - (lj_sigma*r_ij_inv)**6) - 4 * lj_epsilon * ((lj_sigma*lj_cutoff_inv)**12 + (lj_sigma*lj_cutoff_inv)**6)
+
+            potential_energy += V_ij
+
+            # Add this force to the total force on both particles i and j
+            # Note: the force on particle j is the negative of the force on particle i
+            force_ij = force_mag * r_ij * r_ij_inv
+
+            force[i, :] -= force_ij
+            force[j, :] += force_ij
+
+      return force, potential_energy
+
+
+@jit(nopython=True)
+def compute_potential_energy_helper(X, box_length):
+
+    potential_energy = np.zeros(N_horizontal)
+
+    if type_of_potential == 'HO':
+      for t in range(N_horizontal):
+        for i in range(N_atoms):
+          r = X[0, t, i, :] 
+          V_ij = 0.5*m*omega**2*np.sum(r**2)
+          potential_energy[t] += V_ij
+     
+      
+    if lennard_jones_on:
+
+      box_lengths = np.array([box_length, box_length, box_length])
+      for t in range(N_horizontal):
+        for i in range(N_atoms):
+          for j in range(i+1, N_atoms):
+
+            r_ij = X[0, t, j, :] - X[0, t, i, :]
+            
+            # Apply the minimum image convention
+            r_ij -= box_lengths * np.round(r_ij / box_lengths)
+
+            r_ij_norm = np.sqrt(np.sum(r_ij**2))
+
+            if r_ij_norm == 0:
+                raise ValueError("r_ij_norm = 0")
+            if r_ij_norm > lj_cutoff:
+                continue
+
+            lj_cutoff_inv = 1. / lj_cutoff
+
+            if r_ij_norm < lj_cap:
+              lj_cap_inv = 1. / lj_cap
+              A = 24*lj_epsilon*(lj_sigma**6 * lj_cap_inv**7 - 2*lj_sigma**12 * lj_cap_inv**13)
+              V_ij = A*(r_ij_norm - lj_cap)
+              V_ij += 4 * lj_epsilon * ((lj_sigma*lj_cap_inv)**12 - (lj_sigma*lj_cap_inv)**6) 
+              V_ij -= 4 * lj_epsilon * ((lj_sigma*lj_cutoff_inv)**12 + (lj_sigma*lj_cutoff_inv)**6)
+            else:
+              r_ij_inv = 1. / r_ij_norm
+              V_ij = 4 * lj_epsilon * ((lj_sigma*r_ij_inv)**12 - (lj_sigma*r_ij_inv)**6) 
+              V_ij -= 4 * lj_epsilon * ((lj_sigma*lj_cutoff_inv)**12 + (lj_sigma*lj_cutoff_inv)**6)
+
+            potential_energy[t] += V_ij
+
+    elif spring_on:
+      box_lengths = np.array([box_length, box_length, box_length])
+      for t in range(N_horizontal):
+        for i in range(N_atoms):
+          for j in range(i+1, N_atoms):
+
+            r_ij = X[0, t, j, :] - X[0, t, i, :]
+            
+            # Apply the minimum image convention
+            r_ij -= box_lengths * np.round(r_ij / box_lengths)
+
+            r_ij_norm = np.sqrt(np.sum(r_ij**2))
+
+            if r_ij_norm == 0:
+                raise ValueError("r_ij_norm = 0")
+
+            V_ij = 0.5*spring_k*(r_ij_norm - spring_l0)**2
+            potential_energy[t] += V_ij
+
+    return potential_energy
+
+
+
+
+def initialize_fcc_lattice2(N_cells, density):
+
+    a=(4/density)**(1./3.) # FCC has 4 atoms per lattice cell
+    L = a * N_cells 
+    natom = 4 * N_cells**3  # total number of atoms in the box
+
+    j  = 0
+    xi = 0.
+    yi = 0.
+    zi = 0.
+    delta=0.0
+    rrx = np.random.normal(0., delta, natom)
+    rry = np.random.normal(0., delta, natom)
+    rrz = np.random.normal(0., delta, natom)
+
+    rx = np.zeros(natom)
+    ry = np.zeros(natom)
+    rz = np.zeros(natom)
+
+    for nx in range(N_cells):
+      for ny in range(N_cells):
+        for nz in range(N_cells):
+          rx[j] = xi + a*nx + rrx[j]
+          ry[j] = yi + a*ny + rry[j]
+          rz[j] = zi + a*nz + rrz[j]
+
+
+          rx[j]/= L
+          rx[j]-= np.rint(rx[j])
+          ry[j]/= L
+          ry[j]-= np.rint(ry[j])
+          rz[j]/= L
+          rz[j]-= np.rint(rz[j])
+          j +=1
+
+          rx[j] = xi + a*nx + rrx[j] + 0.5*a
+          ry[j] = yi + a*ny + rry[j] + 0.5*a
+          rz[j] = zi + a*nz + rrz[j]
+
+          rx[j]/= L
+          rx[j]-= np.rint(rx[j])
+          ry[j]/= L
+          ry[j]-= np.rint(ry[j])
+          rz[j]/= L
+          rz[j]-= np.rint(rz[j])
+          j +=1
+
+          rx[j] = xi + a*nx + rrx[j] + 0.5*a
+          ry[j] = yi + a*ny + rry[j]
+          rz[j] = zi + a*nz + rrz[j] + 0.5*a
+
+          rx[j]/= L
+          rx[j]-= np.rint(rx[j])
+          ry[j]/= L
+          ry[j]-= np.rint(ry[j])
+          rz[j]/= L
+          rz[j]-= np.rint(rz[j])
+          j +=1
+
+          rx[j] = xi + a*nx + rrx[j]
+          ry[j] = yi + a*ny + rry[j] + 0.5*a
+          rz[j] = zi + a*nz + rrz[j] + 0.5*a
+          rx[j]/= L
+          rx[j]-= np.rint(rx[j])
+          ry[j]/= L
+          ry[j]-= np.rint(ry[j])
+          rz[j]/= L
+          rz[j]-= np.rint(rz[j])
+          j +=1
+
+    all_points = np.array(np.transpose([rx*L, ry*L, rz*L]))
+    # The number of atoms is already correct so no need to shuffle and slice
+    return all_points, a, natom, L
+
+def initialize_fcc_lattice(N_cells, density):
+
+    lattice_spacing=(4/density)**(1./3.) # FCC has 4 atoms per lattice cell
+    L = lattice_spacing * N_cells 
+    num_atoms = 4 * N_cells**3  # total number of atoms in the box
+
+    x = np.linspace(0, L - lattice_spacing, N_cells)  # array of x values
+    y = np.linspace(0, L - lattice_spacing, N_cells)  # array of y values
+    z = np.linspace(0, L - lattice_spacing, N_cells)  # array of z values
+
+    # Using meshgrid to create 3D grid of lattice points
+    xv, yv, zv = np.meshgrid(x, y, z)
+
+    # Stacking together all x, y, and z coordinates for all atoms
+    pos = np.stack((xv, yv, zv), axis=-1).reshape(-1, 3)
+
+    # Creating extra points for the fcc lattice (face centered points)
+    center_points = lattice_spacing/2 * np.array([[0, 1, 1], [1, 0, 1], [1, 1, 0], [0, 0, 0]])
+    all_points = np.concatenate([pos + shift for shift in center_points])
+
+    # The number of atoms is already correct so no need to shuffle and slice
+    return all_points, lattice_spacing, num_atoms, L
+
+def read_and_check_input_file(name = "input.inp"):
+
+  global density, L, N_cells, horizontal_dt, k_T, gamma, type_of_potential, omega, U_0, a, b, N_horizontal, N_atoms, vertical_dt, M, m, thermostat, fict_gamma, save_config_freq, save_Temp_freq, save_pos_freq, save_vel_freq, save_Ham_freq, save_Obs_freq, beta, fict_beta, fict_k_T, x0_HO, init_path_from_points_from_file, init_points_file, generate_new_traj, writer_traj, writer_H, writer_T, writer_obs, lennard_jones_on, lj_sigma, lj_epsilon, lj_cutoff, freq_output_horizontal, freq_output_vertical, N_vertical, restart_horizontal_from_file, restart_vertical_from_file, vertical, horizontal, lj_cap, natoms, spring_k, spring_l0, spring_on, time_check, init_FCC
+ 
+  input_file = open(path + name, 'r')
+
+  ### Reads parameters from input_file ###
+  for line in input_file:
+      line = line.strip().split('=')
+      if line[0].strip() == 'horizontal':
+          horizontal = int(line[1].strip())
+      elif line[0].strip() == 'vertical':
+          vertical = int(line[1].strip()[0])
+      elif line[0].strip() == 'restart_horizontal_from_file':
+          restart_horizontal_from_file = int(line[1].strip()[0])
+      elif line[0].strip() == 'restart_vertical_from_file':
+          restart_vertical_from_file = int(line[1].strip()[0])
+      elif line[0].strip() == 'freq_output_horizontal':
+          freq_output_horizontal = int(line[1].split()[0])
+
+      ### Initialization of the positions
+      elif line[0].strip() == 'L':
+          L = int(line[1].split()[0])
+      elif line[0].strip() == 'N_cells':
+          N_cells = int(line[1].split()[0])
+      elif line[0].strip() == 'density':
+          density = float(line[1].split()[0])
+      elif line[0].strip() == 'natoms':
+          natoms = int(line[1].split()[0])
+
+      ### OVRVO parameters ###
+      elif line[0].strip() == 'horizontal_dt':
+          horizontal_dt = float(line[1].split()[0])
+      elif line[0].strip() == 'k_T':
+          k_T = float(line[1].split()[0])
+      elif line[0].strip() == 'N_horizontal':
+          N_horizontal = int(line[1].split()[0])
+      elif line[0].strip() == 'gamma':
+          gamma = float(line[1].split()[0])
+      elif line[0].strip() == 'm':
+          m = float(line[1].split()[0])
+      elif line[0].strip() == 'N_atoms':
+          N_atoms = int(line[1].split()[0])
+
+
+      elif line[0].strip() == 'init_FCC':
+          init_FCC = int(line[1].split()[0])
+
+      ### Parameters for potential ###
+      elif line[0].strip() == 'spring_on':
+          spring_on = int(line[1].split()[0])
+      elif line[0].strip() == 'time_check':
+          time_check = int(line[1].split()[0])
+      elif line[0].strip() == 'lennard_jones_on':
+          lennard_jones_on = int(line[1].split()[0])
+      elif line[0].strip() == 'lj_epsilon' and lennard_jones_on == 1:
+          lj_epsilon = float(line[1].split()[0])
+      elif line[0].strip() == 'lj_sigma' and lennard_jones_on:
+          lj_sigma = float(line[1].split()[0])
+      elif line[0].strip() == 'lj_cutoff' and lennard_jones_on:
+          lj_cutoff = float(line[1].split()[0])
+      elif line[0].strip() == 'type_of_potential':
+          type_of_potential = line[1].split()[0]
+      elif line[0].strip() == 'omega' and type_of_potential == 'HO':
+          omega = float(line[1].split()[0])
+      elif line[0].strip() == 'x0_HO' and type_of_potential == 'HO':
+          x0_HO = float(line[1].split()[0])
+      # Capping only affecs vertical dynamics
+      elif line[0].strip() == 'lj_cap':
+          lj_cap = float(line[1].split()[0])
+      elif line[0].strip() == 'spring_k':
+          spring_k = float(line[1].split()[0])
+      elif line[0].strip() == 'spring_l0':
+          spring_l0 = float(line[1].split()[0])
+
+      # BAOAB parameters
+      elif line[0].strip() == 'N_vertical':
+          N_vertical = int(line[1].split()[0])
+      elif line[0].strip() == 'vertical_dt':
+          vertical_dt = float(line[1].split()[0])
+      elif line[0].strip() == 'M':
+          M = float(line[1].split()[0])
+      elif line[0].strip() == 'freq_output_vertical':
+          freq_output_vertical = int(line[1].split()[0])
+         
+      ### Thermostatting ###
+      elif line[0].strip() == 'fict_gamma':
+          fict_gamma = float(line[1].split()[0])
+      elif line[0].strip() == 'fict_k_T':
+          fict_k_T = float(line[1].split()[0])
+      ### Constraining ###
+      elif line[0].strip() == 'constraints':
+          use_constraints = line[1].split()[0]
+      elif line[0].strip() == 'shake' and use_constraints == 'Y':
+          use_shake = line[1].split()[0]
+          if(use_constraints == 'Y' and use_shake != 'Y'):
+              print("WARNING:: Trying to use constraints without shake. The simulation proceeds with unconstrained dynamics.")
+      elif line[0].strip() == 'rattle' and use_constraints == 'Y':
+          use_rattle = line[1].split()[0]
+      elif line[0].strip() == 'constraint_tolerance' and use_constraints == 'Y':
+          constraint_tolerance = float(line[1].split()[0])
+  
+      ### Saving parameters ###
+      elif line[0].strip() == 'save_Temp':
+          save_Temp_freq = int(line[1].split()[0])
+      elif line[0].strip() == 'save_config':
+          save_config_freq = int(line[1].split()[0])
+      elif line[0].strip() == 'save_Ham':
+          save_Ham_freq = int(line[1].split()[0])
+      elif line[0].strip() == 'save_Obs':
+          save_Obs_freq = int(line[1].split()[0])
+      elif line[0].strip() == 'save_pos':
+          save_pos_freq = int(line[1].split()[0])
+      elif line[0].strip() == 'save_vel':
+          save_vel_freq = int(line[1].split()[0])
+
+  if vertical:
+    if fict_gamma == 0:
+      print('You are running path dynamics with fict_gamma = 0')
+
+  if horizontal and vertical:
+    raise ValueError("Please run horizontal and vertical dynamics separately")
+
+  if not(horizontal) and not(vertical):
+    raise ValueError("Choose either horizontal or vertical dynamics")
+
+  if vertical and restart_horizontal_from_file:
+    raise ValueError("vertical and restart_horizontal_from_file cannot both be 1")
+
+  if horizontal and restart_vertical_from_file:
+    raise ValueError("horizontal and restart_vertical_from_file cannot both be 1")
+
+
+def setup_csv_writer(filename, header):
+    outfile = open(filename, 'w')
+    writer = csv.writer(outfile)
+    writer.writerow(header)
+    return writer, outfile
+
 
 if __name__ == "__main__":
-    global dt, k_T, N, theta, gamma, type_of_potential, omega, U_0, a, b, do_path_dynamics, number_of_paths, delta_t, M, m, thermostat, fict_gamma, save_config_freq, save_Temp_freq, save_pos_freq, save_vel_freq, save_Ham_freq, save_Obs_freq, beta, fict_beta, fict_k_T, x0_HO, init_path_from_points_from_file, init_points_file, generate_new_traj, writer_traj, writer_H, writer_T, writer_obs
     
-    comm = MPI.COMM_WORLD
-    size = comm.Get_size()
-    rank = comm.Get_rank()
-    #start = time.time()
-    
-    input_file = open(path + 'input.inp','r')
-    print("reading the input file")
-    ### Reads parameters from input_file ###
-    for line in input_file:
-        line = line.strip().split('=')
-        if line[0].strip() == 'generate_new_path':
-            generate_new_traj = line[1].strip()
-        elif line[0].strip() == 'work_name':
-            work_name = line[1].split()[0]
-        elif line[0].strip() == 'input_work_name':
-            input_work_name = line[1].strip().split()[0]
-            input_file.close()
-            break
+    start = time.time()
+    read_and_check_input_file("input.inp")
 
-    if generate_new_traj == 'Y':
-        #constant_file = open(path + 'input_test.inp','r')
-        constant_file = open(path + 'input.inp','r')
-    
-    elif generate_new_traj == 'N':
-        traj_file = input_work_name + '_initial_traj.txt'
-        constant_file = open(path + work_name + '_constants.txt','r')
-    
-    for line in constant_file:
-        ### OVRVO parameters ###
-        line = line.strip().split('=')
-        if line[0].strip() == 'dt':
-            dt = float(line[1].split()[0])
-        elif line[0].strip() == 'k_T':
-            k_T = float(line[1].split()[0])
-        elif line[0].strip() == 'N':
-            N = int(line[1].split()[0])
-        elif line[0].strip() == 'theta':
-            theta = int(line[1].split()[0])
-        elif line[0].strip() == 'gamma':
-            gamma = float(line[1].split()[0])
-        elif line[0].strip() == 'm':
-            m = float(line[1].split()[0])
-
-        ### Parameters for potential ###
-        elif line[0].strip() == 'type_of_potential':
-            type_of_potential = line[1].split()[0]
-        elif line[0].strip() == 'omega' and type_of_potential == 'HO':
-            omega = float(line[1].split()[0])
-        elif line[0].strip() == 'x0_HO' and type_of_potential == 'HO':
-            x0_HO = float(line[1].split()[0])
-        elif line[0].strip() == 'U_0' and type_of_potential == 'DW':
-            U_0 = float(line[1].split()[0])
-        elif line[0].strip() == 'i' and type_of_potential == 'DW':
-            i = float(line[1].split()[0])
-        elif line[0].strip() == 'j' and type_of_potential == 'DW':
-            j = float(line[1].split()[0])
-    constant_file.close()
-    
-    print(f"read_input_file:: dt: {dt}")
-    print(f"read_input_file:: rank: {rank}, k_T: {k_T}")
-
-    #input_file = open(path + 'input_test.inp','r')
-    input_file = open(path + 'input.inp','r')
-    for line in input_file:
-        line = line.strip().split('=')
-        if line[0].strip() == 'do_path_dynamics':
-            do_path_dynamics = line[1].split()[0]
-            break
-    ### Parameters for path dynamics
-    if do_path_dynamics == 'Y':
-        print()
-        #input_file = open(path + 'input_test.inp','r')
-        input_file = open(path + 'input.inp','r')
-        for line in input_file:
-            line = line.strip().split('=')
-            if line[0].strip() == 'number_of_paths':
-                number_of_paths = int(line[1].split()[0])
-            elif line[0].strip() == 'delta_t':
-                delta_t = float(line[1].split()[0])
-            elif line[0].strip() == 'M':
-                M = float(line[1].split()[0])
-            
-            ### Thermostatting ###
-            elif line[0].strip() == 'thermostat':
-                thermostat = line[1].split()[0]
-            elif line[0].strip() == 'fict_gamma' and thermostat == 'Y':
-                fict_gamma = float(line[1].split()[0])
-            elif line[0].strip() == 'fict_gamma' and thermostat == 'N':
-                fict_gamma = 0.0
-            elif line[0].strip() == 'fict_k_T' and thermostat == 'Y':
-                fict_k_T = float(line[1].split()[0])
-            elif line[0].strip() == 'fict_k_T' and thermostat == 'N':
-                fict_k_T = 1.0
-
-            ### Constraining ###
-            elif line[0].strip() == 'constraints':
-                use_constraints = line[1].split()[0]
-            elif line[0].strip() == 'shake' and use_constraints == 'Y':
-                use_shake = line[1].split()[0]
-                if(use_constraints == 'Y' and use_shake != 'Y'):
-                    print("WARNING:: Trying to use constraints without shake. The simulation proceeds with unconstrained dynamics.")
-            elif line[0].strip() == 'rattle' and use_constraints == 'Y':
-                use_rattle = line[1].split()[0]
-            elif line[0].strip() == 'constraint_tolerance' and use_constraints == 'Y':
-                constraint_tolerance = float(line[1].split()[0])
-        
-            #read init points form file
-            elif line[0].strip() == 'initialize_path_from_points_from_file':
-                init_path_from_points_from_file = line[1].split()[0]
-            elif line[0].strip() == 'init_points_file' and init_path_from_points_from_file == 'Y':  
-                init_points_file = line[1].split()[0]   
-        
-            ### Saving parameters ###
-            elif line[0].strip() == 'save_Temp':
-                save_Temp_freq = int(line[1].split()[0])
-            elif line[0].strip() == 'save_config':
-                save_config_freq = int(line[1].split()[0])
-            elif line[0].strip() == 'save_Ham':
-                save_Ham_freq = int(line[1].split()[0])
-            elif line[0].strip() == 'save_Obs':
-                save_Obs_freq = int(line[1].split()[0])
-            '''elif line[0].strip() == 'save_pos':
-                save_pos_freq = int(line[1].split()[0])
-            elif line[0].strip() == 'save_vel':
-                save_vel_freq = int(line[1].split()[0])'''
-
-    if generate_new_traj == 'Y':
-        constants = open(path + work_name + '_constants.txt','w')
-        constants.write("dt = " + str(dt) + '\n')
-        constants.write('k_T = ' + str(k_T)+ '\n')
-        constants.write('N = ' + str(N)+ '\n')
-        constants.write('theta = ' + str(theta)+ '\n')
-        constants.write('gamma = ' + str(gamma)+ '\n')
-        constants.write('m = ' + str(m)+ '\n')
-        if type_of_potential == 'HO':
-            constants.write('type_of_potential = HO'+ '\n')
-            constants.write('omega = ' + str(omega)+ '\n')
-        if type_of_potential == 'DW':
-            constants.write('type_of_potential = DW'+ '\n')
-            constants.write('U_0 = ' + str(U_0)+ '\n')
-            #constants.write('i = ' + str(i)+ '\n')
-            #constants.write('j = ' + str(j)+ '\n')
-
-
-#def main():        
-    #comm = MPI.COMM_WORLD
-    #size = comm.Get_size()
-    #rank = comm.Get_rank()
-	
     beta = k_T **-1
     fict_beta = fict_k_T **-1
-    #if generate_new_traj == 'Y':
-    
-    if(rank == 0):
-        outfile_traj = open("trajectories.csv", 'w')
-        writer_traj = csv.writer(outfile_traj)
-        header_traj = ["path_number", "path_id", "real_time", "x", "y", "z", "vx", "vy", "vz"]
-        writer_traj.writerow(header_traj)
-        #np.savetxt(outfile_traj, ["path_number", "particle_number", "real_time", "x", "v"], delimiter=", ", fmt="%s")
 
-        outfile_H = open("Hamiltonian_for_paths.csv", 'w')
-        writer_H = csv.writer(outfile_H)
-        header_H = ["path_number", "H"]
-        writer_H.writerow(header_H)
+    if horizontal:
+      paths = Paths()
+      paths.initialize_horizontal_dynamic()
 
-        outfile_T = open("temperature_for_paths.csv", 'w')
-        writer_T = csv.writer(outfile_T)
-        header_T = ["path_number", "T_real", "T_fictitious", "T_real_config"]
-        writer_T.writerow(header_T)
-        
-        outfile_obs = open("observable.csv", 'w')
-        writer_obs = csv.writer(outfile_obs)
-        header_obs = ["path_number", "path_id", "lambda_A", "lambda_B", "lambda_Bprime", "observable_x", "observable_y", "observable_z", "run_avg_obs_x", "run_avg_obs_y", "run_avg_obs_z"]
-        writer_obs.writerow(header_obs)
-        
-        outfile_multipliers = open("multipliers.csv", 'w')
-        writer_multipliers = csv.writer(outfile_multipliers)
-        header_multipliers = ["path_number", "path_id", "lambda_x0", "lambda_xN", "mu_x0", "mu_xN"]
-        writer_multipliers.writerow(header_multipliers)
-    else:
-        outfile_traj = None
-        outfile_T = None
-        outfile_H = None
-        outfile_obs = None
-        outfile_multipliers = None
-        
-        writer_traj = None
-        writer_T = None
-        writer_H = None
-        writer_obs = None
-        writer_multipliers = None
+      paths.OVRVO()
+      paths.write_horizontal()
+      print("Horizontal dynamic completed")
+      quit()
 
-    #init_traj_name = "init_trajectory.csv"
+    elif vertical:
+      paths = Paths()
+      paths.initialize_vertical_dynamic()
+      if paths.restart_N_vertical == 0: paths.write_vertical() 
+      paths.vertical_iter += 1
+      while (paths.vertical_iter < N_vertical + paths.restart_N_vertical):
+        #print(f"{paths.vertical_iter} {N_vertical + paths.restart_N_vertical}")
+        start_baoab_time = time.time()
+        paths.BAOAB()
+        end_baoab_time = time.time()
+        if time_check: print(f"BAOAB: {end_baoab_time - start_baoab_time}")
+      
+        if paths.vertical_iter % freq_output_vertical == 0: paths.write_vertical()
+        paths.vertical_iter += 1
 
-    if generate_new_traj == 'Y':
-        #output_traj = open(path + work_name + '_initial_traj.txt','w')
-        #traj_file = work_name + '_initial_traj.txt'
-        '''outfile_init_traj = open(init_traj_name, 'w')
-        writer_init_traj = csv.writer(outfile_init_traj)
-        header_init_traj = ["real_time", "x", "y", "z", "vx", "vy", "vz"]
-        writer_init_traj.writerow(header_init_traj)
-        print('Creating new initial trajectory')
-        if gamma != 0:
-            print('Thermostat on for real dynamics')
-        elif gamma == 0:
-            print('Thermostat off on for real dynamics')
-        OVRVO(writer_init_traj)
-        print('Done with creating initial path')
-        outfile_init_traj.close()'''
-        #output_traj.close()
-    elif generate_new_traj == 'N':
-        if do_path_dynamics == 'N':
-            print('You are creating initial path nor doing path dynamics (you are doing nothing). Go check input file')
-            quit()
-        print('Loading existing trajectory')
-        if gamma != 0:
-            print('Thermostat on for real dynamics')
-        elif gamma == 0:
-            print('Thermostat off on for real dynamics')
+      print("Vertical dynamic completed")
 
-    if do_path_dynamics == 'Y':
-        if gamma == 0:
-            print('You are running path dynamics with gamma = 0, which is not possible. Stopping the program')
-            quit()
-        print('Starting with path dynamcis')
-        if thermostat == 'Y':
-            print('Thermostat on for path dynamics')
-            print(f"fict_gamma = {fict_gamma}")
-            print(f"fict_k_T = {fict_k_T}")
-        elif thermostat == 'N':
-            print('Thermostat off on for path dynamics')
-        dt = dt*theta
-        #r = np.loadtxt(path + traj_file, usecols = 0)
-        #v = np.loadtxt(path + traj_file, usecols = 1)
-        #Pi = np.random.normal(loc = 0.0, scale = np.sqrt(M), size=(2,len(r)))
-        particle_array = initialize_path_dynamics()
-        #particle_array = initialize_path_dynamics(init_traj_name)
-        grad_constraints_matrix, lagrange_multipliers, rattle_multipliers = [], [], []
-        if(use_constraints == 'Y'): grad_constraints_matrix, lagrange_multipliers, rattle_multipliers = initialize_constraints(particle_array)
-        path_sampling(particle_array, lagrange_multipliers, rattle_multipliers, grad_constraints_matrix, outfile_traj, outfile_H, outfile_T)
-        print('Done with path dynamics')
-    
-        if rank == 0:
-            outfile_final_traj = open("final_trajectory.csv", 'w')
-            writer_final_traj = csv.writer(outfile_final_traj)
-            header_final_traj = ["path_number", "path_id", "real_time", "x", "y", "z", "vx", "vy", "vz", "Pi_x", "Pi_y", "Pi_z", "Pi_vx", "Pi_vy", "Pi_vz"]
-            writer_final_traj.writerow(header_final_traj)
-            for part in particle_array:
-                writer_final_traj.writerows(np.c_[[number_of_paths-1]*len(part.pos_array), [part.idp]*len(part.pos_array), [l*dt for l in range(len(part.pos_array))], part.pos_array, part.vel_array, part.Pi_array[0], part.Pi_array[1]])
-            outfile_final_traj.close()
-            
-            outfile_traj.close()
-            outfile_H.close()
-            outfile_T.close()
-    elif do_path_dynamics == 'N':
-        print('Not doing path dynamics as requested in the input file')
-    #end = time.time()
-    #print(f"total time: {end - start}")
+      end = time.time()
+      print(f"total time: {end-start}")
+
+      quit()
+
