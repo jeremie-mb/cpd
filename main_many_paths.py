@@ -79,10 +79,14 @@ class Paths:
           self.X[1, 0, atom_idx, :] = [row['vx'], row['vy'], row['vz']]
 
           if type_of_potential == 'no_potential' and lennard_jones_on:  
-            #_, _, N_atoms, box_length = initialize_fcc_lattice2(N_cells, density)
-            N_atoms = natoms
-            box_length = 100*lj_sigma
-            self.box_length = box_length
+            if init_FCC:
+              _, _, N_atoms, box_length = initialize_fcc_lattice2(N_cells, density)
+              self.box_length = box_length
+              print(f"N_atoms = {N_atoms}")
+            else: 
+              N_atoms = natoms
+              box_length = 100*lj_sigma
+              self.box_length = box_length
           elif type_of_potential == 'no_potential' and spring_on:  
             self.box_length = 100
             box_length = 100
@@ -469,10 +473,12 @@ class Paths:
 
 
         if type_of_potential == 'no_potential' and lennard_jones_on:  
-            _, _, _, _ = initialize_fcc_lattice2(N_cells, density)
-            N_atoms = natoms
-            box_length = 100*lj_sigma
-            self.box_length = box_length
+            if init_FCC: 
+              _, _, N_atoms, box_length = initialize_fcc_lattice2(N_cells, density)
+              self.box_length = box_length
+            else:
+              box_length = 100*lj_sigma
+              self.box_length = box_length
         elif type_of_potential == 'no_potential' and spring_on:  
             self.box_length = 100
             box_length = 100
@@ -767,6 +773,7 @@ def BAOAB_force_jacobian(X):
     return jacobians_over_time
 
 
+@jit(nopython=True)
 def BAOAB_force_jacobian2(X):
 
     jacobians_over_time = np.zeros((N_horizontal, N_atoms, N_atoms, 3, 3))
@@ -845,7 +852,7 @@ def BAOAB_force_jacobian2(X):
                                 for beta in range(alpha, 3):
                                     if alpha == beta:
                                         # Diagonal terms
-                                        result = spring_k * ( 1 - spring_l0 * (1. / r_ij_norm + delta_alpha / r_ij_norm**3) )
+                                        result = spring_k * ( 1 - spring_l0 * (1. / r_ij_norm + delta_alpha**2 / r_ij_norm**3) )
                                         jacobians_over_time[t, i, i, alpha, alpha] += result
 
                                         jacobians_over_time[t, i, j, alpha, alpha] = - result
@@ -854,7 +861,7 @@ def BAOAB_force_jacobian2(X):
                                     else:
                                         # Off-diagonal elements (symmetric in i j and alpha beta)
                                         delta_beta = r_ij[beta]
-                                        result = spring_k * spring_l0 * delta_alpha * delta_beta * (1. / r_ij_norm**2)
+                                        result = spring_k * spring_l0 * delta_alpha * delta_beta / r_ij_norm**2
                                         jacobians_over_time[t, i, i, alpha, beta] += result
                                         jacobians_over_time[t, i, i, beta, alpha] += result
 
@@ -909,7 +916,7 @@ def get_force_jacobian(X): # of size (N_horizontal, N_atoms, 3 , 3)
   return total_force_jacobian
 
 
-#@jit(nopython=True)
+@jit(nopython=True)
 def get_force_jacobian2(X): # of size (N_horizontal, N_atoms, 3 , 3)
   # Take the Jacobian of the potential
   external_force_jacobian = np.zeros((N_horizontal, N_atoms, N_atoms, 3, 3))
