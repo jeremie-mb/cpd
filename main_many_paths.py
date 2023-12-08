@@ -392,7 +392,6 @@ class Paths:
 
         if lennard_jones_on:
           pair_force = self.LJ_force_OVRVO_image()
-          print(pair_force)
         elif spring_on:
           pair_force = self.spring_force_OVRVO() 
         else:
@@ -734,21 +733,21 @@ def BAOAB_force_jacobian(X):
                               lj_factor1 = 24 * lj_epsilon
                               lj_factor2 = 2 * lj_sigma ** 12
                               lj_factor3 = lj_sigma ** 6
-                              lj_factor4 = r_ij_norm ** (-16)
-                              lj_factor5 = r_ij_norm ** (-14)
-                              lj_factor6 = r_ij_norm ** (-10)
-                              lj_factor7 = r_ij_norm ** (-8)
+                              r_ij_inv16 = r_ij_norm ** (-16)
+                              r_ij_inv14 = r_ij_norm ** (-14)
+                              r_ij_inv10 = r_ij_norm ** (-10)
+                              r_ij_inv8 = r_ij_norm ** (-8)
 
                               for alpha in range(3):
                                   delta_alpha = r_ij[alpha]
                                   for beta in range(alpha, 3):
                                       if alpha == beta:
                                         # Diagonal terms
-                                          result = lj_factor1 * delta_alpha * (lj_factor2 * (14 * delta_alpha ** 2 * lj_factor4 - lj_factor5) - lj_factor3 * (8 * delta_alpha ** 2 * lj_factor6 - lj_factor7))
+                                          result = lj_factor1 * delta_alpha * (lj_factor2 * (14 * delta_alpha ** 2 * r_ij_inv16 - r_ij_inv14) - lj_factor3 * (8 * delta_alpha ** 2 * r_ij_inv10 - r_ij_inv8))
                                       else:
                                           # Off-diagonal elements (symmetric)
                                           delta_beta = r_ij[beta]
-                                          result = lj_factor1 * delta_alpha * delta_beta * (28 * lj_factor2 * lj_factor4 - 8 * lj_factor3 * lj_factor6)
+                                          result = lj_factor1 * delta_alpha * delta_beta * (28 * lj_factor2 * r_ij_inv16 - 8 * lj_factor3 * r_ij_inv10)
 
                                       jacobians_over_time[t, i, alpha, beta] -= result
                                       jacobians_over_time[t, i, beta, alpha] -= result
@@ -792,36 +791,37 @@ def BAOAB_force_jacobian2(X):
                             lj_factor1 = 24 * lj_epsilon
                             lj_factor2 = 2 * lj_sigma ** 12
                             lj_factor3 = lj_sigma ** 6
-                            lj_factor4 = r_ij_norm ** (-16)
-                            lj_factor5 = r_ij_norm ** (-14)
-                            lj_factor6 = r_ij_norm ** (-10)
-                            lj_factor7 = r_ij_norm ** (-8)
+                            r_ij_inv16 = r_ij_norm ** (-16)
+                            r_ij_inv14 = r_ij_norm ** (-14)
+                            r_ij_inv10 = r_ij_norm ** (-10)
+                            r_ij_inv8 = r_ij_norm ** (-8)
 
                             for alpha in range(3):
                                 delta_alpha = r_ij[alpha]
                                 for beta in range(alpha, 3):
                                     if alpha == beta:
                                         # Diagonal terms
-                                        result = - lj_factor1 * (lj_factor2 * (14 * delta_alpha ** 2 * lj_factor4 - lj_factor5) - lj_factor3 * (8 * delta_alpha ** 2 * lj_factor6 - lj_factor7))
+                                        result = lj_factor1 * (lj_factor3 * (8 * delta_alpha ** 2 * r_ij_inv10 - r_ij_inv8)\
+                                                             - lj_factor2 * (14 * delta_alpha ** 2 * r_ij_inv16 - r_ij_inv14))
 
                                         jacobians_over_time[t, i, i, alpha, alpha] += result
 
-                                        jacobians_over_time[t, i, j, alpha, alpha] = result
+                                        jacobians_over_time[t, i, j, alpha, alpha] = - result
 
-                                        jacobians_over_time[t, j, i, alpha, alpha] = result
+                                        jacobians_over_time[t, j, i, alpha, alpha] = - result
                                     else:
                                         # Off-diagonal elements (symmetric in i j and alpha beta)
                                         delta_beta = r_ij[beta]
-                                        result = - lj_factor1 * delta_alpha * delta_beta * (14 * lj_factor2 * lj_factor4 - 8 * lj_factor3 * lj_factor6)
+                                        result = lj_factor1 * delta_alpha * delta_beta * (8 * lj_factor3 * r_ij_inv10 - 14 * lj_factor2 * r_ij_inv16)
 
                                         jacobians_over_time[t, i, i, alpha, beta] += result
                                         jacobians_over_time[t, i, i, beta, alpha] += result
 
-                                        jacobians_over_time[t, i, j, alpha, beta] = result
-                                        jacobians_over_time[t, i, j, beta, alpha] = result
+                                        jacobians_over_time[t, i, j, alpha, beta] = - result
+                                        jacobians_over_time[t, i, j, beta, alpha] = - result
 
-                                        jacobians_over_time[t, j, i, alpha, beta] = result
-                                        jacobians_over_time[t, j, i, beta, alpha] = result
+                                        jacobians_over_time[t, j, i, alpha, beta] = - result
+                                        jacobians_over_time[t, j, i, beta, alpha] = - result
 
     if spring_on:
         for t in range(N_horizontal):
@@ -845,12 +845,12 @@ def BAOAB_force_jacobian2(X):
                                 for beta in range(alpha, 3):
                                     if alpha == beta:
                                         # Diagonal terms
-                                        result = spring_k * ( 1 - spring_l0 * (delta_alpha / r_ij_norm**3) )
+                                        result = spring_k * ( 1 - spring_l0 * (1. / r_ij_norm + delta_alpha / r_ij_norm**3) )
                                         jacobians_over_time[t, i, i, alpha, alpha] += result
 
-                                        jacobians_over_time[t, i, j, alpha, alpha] = result
+                                        jacobians_over_time[t, i, j, alpha, alpha] = - result
 
-                                        jacobians_over_time[t, j, i, alpha, alpha] = result
+                                        jacobians_over_time[t, j, i, alpha, alpha] = - result
                                     else:
                                         # Off-diagonal elements (symmetric in i j and alpha beta)
                                         delta_beta = r_ij[beta]
@@ -858,11 +858,11 @@ def BAOAB_force_jacobian2(X):
                                         jacobians_over_time[t, i, i, alpha, beta] += result
                                         jacobians_over_time[t, i, i, beta, alpha] += result
 
-                                        jacobians_over_time[t, i, j, alpha, beta] = result
-                                        jacobians_over_time[t, i, j, beta, alpha] = result
+                                        jacobians_over_time[t, i, j, alpha, beta] = - result
+                                        jacobians_over_time[t, i, j, beta, alpha] = - result
 
-                                        jacobians_over_time[t, j, i, alpha, beta] = result
-                                        jacobians_over_time[t, j, i, beta, alpha] = result
+                                        jacobians_over_time[t, j, i, alpha, beta] = - result
+                                        jacobians_over_time[t, j, i, beta, alpha] = - result
  
     return jacobians_over_time
 
