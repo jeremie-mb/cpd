@@ -1084,6 +1084,29 @@ def get_dS_helper_manually(X):
   return stacked_array
 
 
+@jit(nopython=True)
+def get_J_times_R(grad_forces, pos, forces, vel, a):
+
+    R1 = np.zeros((N_horizontal, N_atoms, 3))
+    R2 = np.zeros((N_horizontal, N_atoms, 3))
+    R3 = np.zeros((N_atoms, 3))
+    R4 = np.zeros((N_atoms, 3))
+
+    for i in range(N_atoms):
+        for j in range(N_atoms):
+            R1[0, i] += np.dot(grad_forces[0, i, j], pos[1, j] - pos[0, j])
+            R1[-1, i] += np.dot(grad_forces[-1, i, j], pos[-1, j] - pos[-2, j])
+            R2[0, i] += np.dot(grad_forces[0, i, j], forces[0, j])
+            R2[-1, i] += np.dot(grad_forces[-1, i, j], forces[-1, j])
+            for t in range(1, len(grad_forces) - 1):
+                R1[t, i] += np.dot(grad_forces[t, i, j], (1 + a) * pos[t, j] - a * pos[t - 1, j] - pos[t + 1, j])
+                R2[t, i] += np.dot(grad_forces[t, i, j], forces[t, j])
+
+            R3[i] += np.dot(grad_forces[0, i, j], vel[0, j])
+            R4[i] += np.dot(grad_forces[-1, i, j], vel[-1, j])
+
+    return R1, R2, R3, R4
+
 #@jit(nopython=True)
 def get_dS_helper_manually2(X):
   '''
@@ -1093,13 +1116,20 @@ def get_dS_helper_manually2(X):
   # grad_forces size (N_horizontal, N_atoms, N_atoms, 3, 3)
   # X size (N_horizontal, N_atoms, 3)
 
+  start_time = time.time()
   grad_forces = get_force_jacobian2(X)
-  forces = get_force(X)
+  end_time = time.time()
+  if time_check: print(f"grad_forces {end_time - start_time}")
 
-  R1 = np.zeros((N_horizontal, N_atoms, 3))
-  R2 = np.zeros((N_horizontal, N_atoms, 3))
-  R3 = np.zeros((N_atoms, 3))
-  R4 = np.zeros((N_atoms, 3))
+  start_time = time.time()
+  forces = get_force(X)
+  end_time = time.time()
+  if time_check: print(f"get_forces {end_time - start_time}")
+
+  #R1 = np.zeros((N_horizontal, N_atoms, 3))
+  #R2 = np.zeros((N_horizontal, N_atoms, 3))
+  #R3 = np.zeros((N_atoms, 3))
+  #R4 = np.zeros((N_atoms, 3))
 
   a = np.exp(-gamma*horizontal_dt)
   b = np.sqrt(2/(gamma*horizontal_dt)*math.tanh(gamma*horizontal_dt/2))
@@ -1109,28 +1139,26 @@ def get_dS_helper_manually2(X):
 
   dS_n, dS_r_0, dS_v_0, dS_r_N, dS_v_N, dS_r_array, dS_v_array, result = [], [], [], [], [], [], [], []
 
-  for i in range(N_atoms):
-    for j in range(N_atoms):
-      R1[0, i] += np.dot(grad_forces[0, i, j], pos[1, j] - pos[0, j])
-      R1[-1, i] += np.dot(grad_forces[-1, i, j], pos[-1, j] - pos[-2, j])
-      R2[0, i] += np.dot(grad_forces[0, i, j], forces[0, j])
-      R2[-1, i] += np.dot(grad_forces[-1, i, j], forces[-1, j])
-      for t in range(1, len(grad_forces) - 1):
-        R1[t, i] += np.dot(grad_forces[t, i, j], (1+a)*pos[t, j] - a*pos[t-1, j] - pos[t+1, j])
-        R2[t, i] += np.dot(grad_forces[t, i, j], forces[t, j])
+  start_time = time.time()
+  R1, R2, R3, R4 = get_J_times_R(grad_forces, pos, forces, vel, a)
+
+  #for i in range(N_atoms):
+  #  for j in range(N_atoms):
+  #    R1[0, i] += np.dot(grad_forces[0, i, j], pos[1, j] - pos[0, j])
+  #    R1[-1, i] += np.dot(grad_forces[-1, i, j], pos[-1, j] - pos[-2, j])
+  #    R2[0, i] += np.dot(grad_forces[0, i, j], forces[0, j])
+  #    R2[-1, i] += np.dot(grad_forces[-1, i, j], forces[-1, j])
+  #    for t in range(1, len(grad_forces) - 1):
+  #      R1[t, i] += np.dot(grad_forces[t, i, j], (1+a)*pos[t, j] - a*pos[t-1, j] - pos[t+1, j])
+  #      R2[t, i] += np.dot(grad_forces[t, i, j], forces[t, j])
       
-      #print(f"i = {i} R1 = {R1[:,i]}")
-      #print(f"i = {i} R2 = {R2[:,i]}")
-
-      #R1[:, i] += np.einsum('ijk,ik->ij', grad_forces[1:-1, i, j], (1+a)*pos[1:-1, i] - a*pos[:-2, i] - pos[2:, i])
-      #R2[:, i] += np.einsum('ijk,ik->ij', grad_forces[1:-1, i, j], (1+a)*pos[1:-1, i] - a*pos[:-2, i] - pos[2:, i])
-
-      #R2[1:-1, i] += np.dot(grad_forces[1:-1, i, j], forces[1:-1, i])
-
-      R3[i] += np.dot(grad_forces[0, i, j], vel[0, j])
-      R4[i] += np.dot(grad_forces[-1, i, j], vel[-1, j])
+  #    R3[i] += np.dot(grad_forces[0, i, j], vel[0, j])
+  #    R4[i] += np.dot(grad_forces[-1, i, j], vel[-1, j])
   
-
+  end_time = time.time()
+  if time_check: print(f"R's {end_time - start_time}")
+  
+  start_time = time.time()
   for i in range(N_atoms):
     #print(R2[1:-1,i])
     dS_n.append([beta*m/((1-a)*fict_beta) * (\
@@ -1167,6 +1195,9 @@ def get_dS_helper_manually2(X):
     dS_v_array.append(np.concatenate(([dS_v_0[i]], dS_n[i][1], [dS_v_N[i]]), axis=0))
 
     result.append(np.array([dS_r_array[i], dS_v_array[i]]))
+
+  start_time = time.time()
+  if time_check: print(f"main loop in get_dS {end_time - start_time}")
 
   stacked_array = np.stack(result, axis=2)
 
