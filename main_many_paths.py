@@ -78,24 +78,26 @@ class Paths:
           self.X[0, 0, atom_idx, :] = [row['x'], row['y'], row['z']]
           self.X[1, 0, atom_idx, :] = [row['vx'], row['vy'], row['vz']]
 
-          if type_of_potential == 'no_potential' and lennard_jones_on:  
-            if init_FCC:
+        if type_of_potential == 'no_potential':
+          if lennard_jones_on:  
+            if init_FCC: 
+              # Crystal argon atom
               _, _, N_atoms, box_length = initialize_fcc_lattice2(N_cells, density)
               self.box_length = box_length
-            else: 
-              N_atoms = natoms
+            else:
+              # Free argon atom
               box_length = 100
-              self.box_length = box_length
-          elif type_of_potential == 'no_potential' and spring_on:  
+              self.box_length = 100
+          if spring_on:  
             self.box_length = 100
             box_length = 100
             N_atoms = natoms
-          elif type_of_potential == 'HO':
-            self.box_length = 100
-            box_length = 100
-            N_atoms = natoms
-          else:
-            raise ValueError("No potential and no Lennard Jones")
+        elif type_of_potential == 'HO':
+          self.box_length = 100
+          box_length = 100
+          N_atoms = natoms
+        else:
+          raise ValueError("No potential and no Lennard Jones")
 
         self.kinetic_energy = np.zeros(N_horizontal)
         self.potential_energy_vector = np.zeros(N_horizontal)
@@ -116,8 +118,13 @@ class Paths:
               r[2, :] = np.array([0.0,0.5,0.0])
             else:
               ValueError("spring_on only works with 2 or 3 atoms")
-            v = np.random.normal(loc = 0.0, scale = 0, size = 3*N_atoms).reshape(N_atoms, 3)
-          elif lennard_jones:
+            vx = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = N_atoms)
+            vy = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = N_atoms)
+            vz = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = N_atoms)
+            v = np.transpose([vx, vy, vz])
+            v -= np.mean(v, axis = 0)
+
+          elif lennard_jones_on:
             r_eq = (2**(1. /6 )) * lj_sigma 
             if init_FCC:
               r, lattice_spacing, N_atoms, box_length = initialize_fcc_lattice2(N_cells, density)
@@ -134,6 +141,12 @@ class Paths:
                 r[2, :] = np.array([0.0,0.5*r_eq,0.0])
               else:
                 ValueError("lennard_jones_on only works with 2 or 3 atoms")
+            vx = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = N_atoms)
+            vy = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = N_atoms)
+            vz = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = N_atoms)
+            v = np.transpose([vx, vy, vz])
+            v -= np.mean(v, axis = 0)
+
           else: 
             box_length = 100
             N_atoms = natoms
@@ -487,24 +500,26 @@ class Paths:
         # Initialize self.X as a zero array
         self.X = np.zeros((2, N_horizontal, N_atoms, 3))
 
-
-        if type_of_potential == 'no_potential' and lennard_jones_on:  
+        if type_of_potential == 'no_potential':
+          if lennard_jones_on:  
             if init_FCC: 
+              # Crystal argon atom
               _, _, N_atoms, box_length = initialize_fcc_lattice2(N_cells, density)
               self.box_length = box_length
             else:
+              # Free argon atom
               box_length = 100
               self.box_length = 100
-        elif type_of_potential == 'no_potential' and spring_on:  
+          if spring_on:  
             self.box_length = 100
             box_length = 100
             N_atoms = natoms
         elif type_of_potential == 'HO':
-            self.box_length = 100
-            box_length = 100
-            N_atoms = natoms
+          self.box_length = 100
+          box_length = 100
+          N_atoms = natoms
         else:
-            raise ValueError("No potential and no Lennard Jones")
+          raise ValueError("No potential and no Lennard Jones")
 
         # Fill self.X with the data from the last trajectory
         for idx, row in df.iterrows():
@@ -516,6 +531,7 @@ class Paths:
 
 
         self.PI = np.random.normal(size = 2*N_horizontal*N_atoms*3, scale = np.sqrt(M*fict_k_T)).reshape((2, N_horizontal, N_atoms, 3))
+        # Set center of mass momentum to 0
         self.PI -= np.mean(self.PI, axis = (0,1,2))
 
         self.vertical_iter = 0
@@ -536,8 +552,8 @@ class Paths:
       dS is always available here
       either calculated in the previous iteration of BAOAB or in the vertical initialization
       '''
-      start_block = time.time()
       # B block
+      start_block = time.time()
       self.PI -= self.dS*(vertical_dt/2)
       end_block = time.time()
       if time_check: print(f"b block1: {end_block - start_block}")
@@ -644,22 +660,27 @@ class Paths:
 
     def get_vertical_hamiltonian(self): # X is of size (2, N_horizontal, N_atoms, 3) 
       self.S = get_S_helper(self.X, self.potential_energy_vector[0])
-      print(f"potential energy 0 = {self.potential_energy_vector[0]}")
-      print(f"self.S = {self.S}")
-      print(f"kinetic part = {np.sum(self.PI**2/M)}")
       self.vertical_hamiltonian = self.S + np.sum(self.PI**2/(2*M))
       return self.vertical_hamiltonian
 
     def get_dS(self): # X is of size (2, N, N_atoms, 3) 
+      'First iteration with get_force_jacobian() (incorrect)'
+      #self.dS = get_dS_helper(self.X)  
+
+      'Second iteration with get_force_jacobian2() (correct) and manual loop over atoms instead of vectorization (not necessary)'
+      #self.dS = get_dS_helper_manually(self.X)  
+
+      'Third iteration with get_force_jacobian2() (correct), manual loop over atoms, and no np.einsum (numba possible)'
       self.dS = get_dS_helper_manually2(self.X)
-      #self.dS = get_dS_helper_manually(self.X)
-      #quit()
+      
+      'Fourth iteration with get_force_jacobian2() (correct), manual loop over atoms, and no np.einsum (numba possible) and folding with get_J_times_R_folded()'
+      #self.dS = get_dS_helper_manually2_folded(self.X)
       return self.dS
 
 
 '''
 Below are all the functions which use numba for acceleration, and some utility functions 
-They rely on numba and so are outside the Paths class because numba works better with functions than with methods
+They rely on numba and so are outside the Paths class for compatibility reasons
 '''
 @jit(nopython=True)
 def BAOAB_force(X): # X[0] is of size (N_horizontal, N_atoms, 3)
@@ -716,7 +737,9 @@ def BAOAB_force(X): # X[0] is of size (N_horizontal, N_atoms, 3)
 
 @jit(nopython=True)
 def BAOAB_force_jacobian(X):
-
+'''
+Incorrect. 
+'''
     jacobians_over_time = np.zeros((N_horizontal, N_atoms, 3, 3))
     box_lengths = np.array([box_length, box_length, box_length])
     if lennard_jones_on or spring_on:
@@ -792,7 +815,9 @@ def BAOAB_force_jacobian(X):
 
 @jit(nopython=True)
 def BAOAB_force_jacobian2(X):
-
+'''
+Correct
+'''
     jacobians_over_time = np.zeros((N_horizontal, N_atoms, N_atoms, 3, 3))
     box_lengths = np.array([box_length, box_length, box_length])
     if lennard_jones_on:
@@ -887,10 +912,7 @@ def BAOAB_force_jacobian2(X):
 
                                         jacobians_over_time[t, j, i, alpha, beta] = - result
                                         jacobians_over_time[t, j, i, beta, alpha] = - result
- 
     return jacobians_over_time
-
-
 
 @jit(nopython=True)
 def get_force(X):
@@ -908,6 +930,9 @@ def get_force(X):
 
 #@jit(nopython=True)
 def get_force_jacobian(X): # of size (N_horizontal, N_atoms, 3 , 3)
+'''
+Incorrect.
+'''
   # Take the Jacobian of the potential
   external_force_jacobian = np.zeros((N_horizontal, N_atoms, 3, 3))
   pair_force_jacobian = np.zeros((N_horizontal, N_atoms, 3, 3))
@@ -947,12 +972,7 @@ def get_force_jacobian2(X): # of size (N_horizontal, N_atoms, 3 , 3)
           elif type_of_potential == 'no_potential':
               external_force_jacobian[t, i, j, :, :] = np.zeros((3, 3))
 
-  #if type_of_potential == 'HO':
-  #  external_force_jacobian = np.tile(-m*omega**2 * np.eye(3), (N_horizontal, N_atoms, 1, 1))
-  #elif type_of_potential == 'no_potential':
-  #  external_force_jacobian = np.zeros((N_horizontal, N_atoms, 3, 3))
-
-  # Add the Jacobian of the pair interaction
+  # Add the Jacobian of the pair interaction 
   pair_force_jacobian = BAOAB_force_jacobian2(X)
 
   total_force_jacobian = external_force_jacobian + pair_force_jacobian
@@ -995,7 +1015,6 @@ def get_dS_helper(X):
   end_block_time = time.time()
   if time_check: print(f"dS_n: {end_block_time - start_block_time}")
 
-  
   start_block_time = time.time()
   dS_r_0 = -beta * forces[0]/fict_beta + (beta*m/((1-a)*fict_beta)) * (\
     -(1+a)/(b*horizontal_dt)**2 *(pos[1]-pos[0])\
@@ -1042,7 +1061,7 @@ def get_dS_helper_manually(X):
   Same as get_dS_helper() but not vectorized for checking (it yields same results)
   '''
 
-  grad_forces = get_force_jacobian(X)
+  grad_forces = get_force_jacobian2(X)
   forces = get_force(X)
 
   a = np.exp(-gamma*horizontal_dt)
@@ -1100,8 +1119,51 @@ def get_dS_helper_manually(X):
 
   return stacked_array
 
-
 @jit(nopython=True)
+def get_J_times_R_folded(grad_forces, pos, forces, vel, a):
+
+    box_lengths = np.array([box_length, box_length, box_length])
+    R1 = np.zeros((N_horizontal, N_atoms, 3))
+    R2 = np.zeros((N_horizontal, N_atoms, 3))
+    R3 = np.zeros((N_atoms, 3))
+    R4 = np.zeros((N_atoms, 3))
+
+    for i in range(N_atoms):
+        for j in range(N_atoms):
+
+            # Apply minimum image 
+
+            r_01 = pos[1, j] - pos[0, j]
+            r_01 -=  box_lengths * np.round( r_01 / box_lengths)
+
+            r_m1m2 = pos[-1, j] - pos[-2, j]
+            r_m1m2 -=  box_lengths * np.round( r_m1m2 / box_lengths)
+
+            R1[0, i] += np.dot(grad_forces[0, i, j], r_01 )
+            R1[-1, i] += np.dot(grad_forces[-1, i, j], r_m1m2)
+            R2[0, i] += np.dot(grad_forces[0, i, j], forces[0, j])
+            R2[-1, i] += np.dot(grad_forces[-1, i, j], forces[-1, j])
+            for t in range(1, len(grad_forces) - 1):
+
+                r_tp1_t = pos[t, j] - pos[t+1, j]
+                r_tp1_t -= box_lengths * np.round( r_tp1_t / box_lengths)
+
+                r_tm1_t = pos[t, j] - pos[t-1, j]
+                r_tm1_t -= box_lengths * np.round( r_tm1_t / box_lengths)
+
+                R1[t, i] += np.dot(grad_forces[t, i, j], r_tp1_t)
+                R1[t, i] += a * np.dot(grad_forces[t, i, j], r_tm1_t)
+
+                R2[t, i] += np.dot(grad_forces[t, i, j], forces[t, j])
+
+            R3[i] += np.dot(grad_forces[0, i, j], vel[0, j])
+            R4[i] += np.dot(grad_forces[-1, i, j], vel[-1, j])
+
+    return R1, R2, R3, R4
+
+
+
+#@jit(nopython=True)
 def get_J_times_R(grad_forces, pos, forces, vel, a):
 
     R1 = np.zeros((N_horizontal, N_atoms, 3))
@@ -1111,13 +1173,13 @@ def get_J_times_R(grad_forces, pos, forces, vel, a):
 
     for i in range(N_atoms):
         for j in range(N_atoms):
-            R1[0, i] += np.dot(grad_forces[0, i, j], pos[1, j] - pos[0, j])
-            R1[-1, i] += np.dot(grad_forces[-1, i, j], pos[-1, j] - pos[-2, j])
-            R2[0, i] += np.dot(grad_forces[0, i, j], forces[0, j])
-            R2[-1, i] += np.dot(grad_forces[-1, i, j], forces[-1, j])
+            R1[0, i] += np.dot(grad_forces[0, i, j].T, pos[1, j] - pos[0, j])
+            R1[-1, i] += np.dot(grad_forces[-1, i, j].T, pos[-1, j] - pos[-2, j])
+            R2[0, i] += np.dot(grad_forces[0, i, j].T, forces[0, j])
+            R2[-1, i] += np.dot(grad_forces[-1, i, j].T, forces[-1, j])
             for t in range(1, len(grad_forces) - 1):
-                R1[t, i] += np.dot(grad_forces[t, i, j], (1 + a) * pos[t, j] - a * pos[t - 1, j] - pos[t + 1, j])
-                R2[t, i] += np.dot(grad_forces[t, i, j], forces[t, j])
+                R1[t, i] += np.dot(grad_forces[t, i, j].T, (1 + a) * pos[t, j] - a * pos[t - 1, j] - pos[t + 1, j])
+                R2[t, i] += np.dot(grad_forces[t, i, j].T, forces[t, j])
 
             R3[i] += np.dot(grad_forces[0, i, j], vel[0, j])
             R4[i] += np.dot(grad_forces[-1, i, j], vel[-1, j])
@@ -1126,9 +1188,6 @@ def get_J_times_R(grad_forces, pos, forces, vel, a):
 
 #@jit(nopython=True)
 def get_dS_helper_manually2(X):
-  '''
-  Same as get_dS_helper() but not vectorized for checking (it yields same results)
-  '''
 
   # grad_forces size (N_horizontal, N_atoms, N_atoms, 3, 3)
   # X size (N_horizontal, N_atoms, 3)
@@ -1143,11 +1202,6 @@ def get_dS_helper_manually2(X):
   end_time = time.time()
   if time_check: print(f"get_forces {end_time - start_time}")
 
-  #R1 = np.zeros((N_horizontal, N_atoms, 3))
-  #R2 = np.zeros((N_horizontal, N_atoms, 3))
-  #R3 = np.zeros((N_atoms, 3))
-  #R4 = np.zeros((N_atoms, 3))
-
   a = np.exp(-gamma*horizontal_dt)
   b = np.sqrt(2/(gamma*horizontal_dt)*math.tanh(gamma*horizontal_dt/2))
 
@@ -1158,26 +1212,11 @@ def get_dS_helper_manually2(X):
 
   start_time = time.time()
   R1, R2, R3, R4 = get_J_times_R(grad_forces, pos, forces, vel, a)
-
-  #for i in range(N_atoms):
-  #  for j in range(N_atoms):
-  #    R1[0, i] += np.dot(grad_forces[0, i, j], pos[1, j] - pos[0, j])
-  #    R1[-1, i] += np.dot(grad_forces[-1, i, j], pos[-1, j] - pos[-2, j])
-  #    R2[0, i] += np.dot(grad_forces[0, i, j], forces[0, j])
-  #    R2[-1, i] += np.dot(grad_forces[-1, i, j], forces[-1, j])
-  #    for t in range(1, len(grad_forces) - 1):
-  #      R1[t, i] += np.dot(grad_forces[t, i, j], (1+a)*pos[t, j] - a*pos[t-1, j] - pos[t+1, j])
-  #      R2[t, i] += np.dot(grad_forces[t, i, j], forces[t, j])
-      
-  #    R3[i] += np.dot(grad_forces[0, i, j], vel[0, j])
-  #    R4[i] += np.dot(grad_forces[-1, i, j], vel[-1, j])
-  
   end_time = time.time()
   if time_check: print(f"R's {end_time - start_time}")
   
   start_time = time.time()
   for i in range(N_atoms):
-    #print(R2[1:-1,i])
     dS_n.append([beta*m/((1-a)*fict_beta) * (\
     (1+a)/(b*horizontal_dt)**2 * (2*pos[1:-1, i] - pos[2:, i] - pos[:-2, i])\
     + (1/(2*m))*((1+a)*forces[1:-1, i]-forces[:-2, i]-a*forces[2:, i])\
@@ -1218,12 +1257,104 @@ def get_dS_helper_manually2(X):
 
   stacked_array = np.stack(result, axis=2)
 
-  #print(stacked_array.shape)
-  #print(stacked_array[1])
-
   return stacked_array
 
 
+#@jit(nopython=True)
+def get_dS_helper_manually2_folded(X):
+  '''
+  Same as get_dS_helper() but not vectorized for checking (it yields same results)
+  '''
+
+  box_lengths = np.array([box_length, box_length, box_length])
+  # grad_forces size (N_horizontal, N_atoms, N_atoms, 3, 3)
+  # X size (N_horizontal, N_atoms, 3)
+
+  start_time = time.time()
+  grad_forces = get_force_jacobian2(X)
+  end_time = time.time()
+  if time_check: print(f"grad_forces {end_time - start_time}")
+
+  start_time = time.time()
+  forces = get_force(X)
+  end_time = time.time()
+  if time_check: print(f"get_forces {end_time - start_time}")
+
+  a = np.exp(-gamma*horizontal_dt)
+  b = np.sqrt(2/(gamma*horizontal_dt)*math.tanh(gamma*horizontal_dt/2))
+
+  pos = X[0, ...]
+  vel = X[1, ...]
+
+  dS_n, dS_r_0, dS_v_0, dS_r_N, dS_v_N, dS_r_array, dS_v_array, result = [], [], [], [], [], [], [], []
+
+  start_time = time.time()
+  R1, R2, R3, R4 = get_J_times_R_folded(grad_forces, pos, forces, vel, a)
+
+  end_time = time.time()
+  if time_check: print(f"R's {end_time - start_time}")
+  
+  start_time = time.time()
+  for i in range(N_atoms):
+
+    delta0 = pos[1:-1, i] - pos[2:, i] 
+    delta1 = pos[1:-1, i] - pos[:-2, i] 
+    delta2 = pos[:-2, i] - pos[2:, i]
+    delta3 = pos[1, i] - pos[0, i]
+    delta4 = pos[-1, i] - pos[-2, i]
+
+    delta0 -= box_lengths * np.round( delta0 / box_lengths )
+    delta1 -= box_lengths * np.round( delta1 / box_lengths )
+    delta2 -= box_lengths * np.round( delta2 / box_lengths )
+    delta3 -= box_lengths * np.round( delta3 / box_lengths )
+    delta4 -= box_lengths * np.round( delta4 / box_lengths )
+
+    dS_n.append([beta*m/((1-a)*fict_beta) * (\
+    #(1+a)/(b*horizontal_dt)**2 * (2*pos[1:-1, i] - pos[2:, i] - pos[:-2, i])\
+    (1+a)/(b*horizontal_dt)**2 * (delta0 + delta1)\
+    + (1/(2*m))*((1+a)*forces[1:-1, i]-forces[:-2, i]-a*forces[2:, i])\
+    + (1/(2*m)) * R1[1:-1, i] \
+    + ((b*horizontal_dt)/(2*m))**2 * (1+a) * R2[1:-1, i]\
+    + np.sqrt(a)/(b*horizontal_dt)*(vel[2:, i]-vel[:-2, i])),\
+    #beta*m/((1-a)*fict_beta) * ((1+a) * vel[1:-1, i] + np.sqrt(a)/(b*horizontal_dt) * (pos[:-2, i]-pos[2:, i]))])
+    beta*m/((1-a)*fict_beta) * ((1+a) * vel[1:-1, i] + np.sqrt(a)/(b*horizontal_dt) * delta2)])
+
+
+    dS_r_0.append(-beta * forces[0, i]/fict_beta + (beta*m/((1-a)*fict_beta)) * (\
+    #-(1+a)/(b*horizontal_dt)**2 *(pos[1, i]-pos[0, i])\
+    -(1+a)/(b*horizontal_dt)**2 *delta3\
+    - (1/(2*m))*(a*forces[1, i]-forces[0, i]) \
+    + np.sqrt(a)/(b*horizontal_dt) * (vel[1, i] + vel[0, i]) \
+    - 1/(2*m) * R1[0, i]\
+    + np.sqrt(a)*b*horizontal_dt/(2*m) * R3[i]\
+    + (b*horizontal_dt)**2/(2*m)**2 * R2[0, i]))
+
+    #dS_v_0.append(beta*m*vel[0, i]/fict_beta + beta*m/((1-a)*fict_beta) * np.sqrt(a) * (-(pos[1, i]-pos[0, i]) / (b*horizontal_dt) + b*horizontal_dt/2 * forces[0, i]/m + np.sqrt(a)*vel[0, i]))
+    dS_v_0.append(beta*m*vel[0, i]/fict_beta + beta*m/((1-a)*fict_beta) * np.sqrt(a) * (-delta3 / (b*horizontal_dt) + b*horizontal_dt/2 * forces[0, i]/m + np.sqrt(a)*vel[0, i]))
+
+
+    dS_r_N.append(beta*m/((1-a)*fict_beta) * (\
+    #(1+a)/(b*horizontal_dt)**2 * (pos[-1, i]-pos[-2, i])\
+    (1+a)/(b*horizontal_dt)**2 * delta4\
+    + (1/(2*m))*(a*forces[-1, i]-forces[-2, i]) \
+    - np.sqrt(a)/(b*horizontal_dt) * (vel[-1, i] + vel[-2, i]) \
+    + (a/(2*m)) * R1[-1, i] \
+    + (b*horizontal_dt)**2/(2*m)**2 * a * R2[-1, i]\
+    - np.sqrt(a)*b*horizontal_dt/(2*m)* R4[i]))
+
+    dS_v_N.append(beta*m/((1-a)*fict_beta) * (-np.sqrt(a) * ((pos[-1, i]-pos[-2, i]) / (b*horizontal_dt) + b*horizontal_dt/2 * forces[-1, i]/m) + vel[-1, i]))
+
+    dS_r_array.append(np.concatenate(([dS_r_0[i]], dS_n[i][0], [dS_r_N[i]]), axis=0))
+    dS_v_array.append(np.concatenate(([dS_v_0[i]], dS_n[i][1], [dS_v_N[i]]), axis=0))
+
+    result.append(np.array([dS_r_array[i], dS_v_array[i]]))
+
+  start_time = time.time()
+  if time_check: print(f"main loop in get_dS {end_time - start_time}")
+
+  stacked_array = np.stack(result, axis=2)
+
+  return stacked_array
 
 def get_S_helper(X, pot_0):
 
@@ -1394,9 +1525,6 @@ def compute_potential_energy_helper(X, box_length):
             potential_energy[t] += V_ij
 
     return potential_energy
-
-
-
 
 def initialize_fcc_lattice2(N_cells, density):
 
