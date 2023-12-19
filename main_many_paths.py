@@ -82,18 +82,17 @@ class Paths:
             if init_FCC:
               _, _, N_atoms, box_length = initialize_fcc_lattice2(N_cells, density)
               self.box_length = box_length
-              print(f"N_atoms = {N_atoms}")
             else: 
               N_atoms = natoms
-              box_length = 100*lj_sigma
+              box_length = 100
               self.box_length = box_length
           elif type_of_potential == 'no_potential' and spring_on:  
             self.box_length = 100
             box_length = 100
             N_atoms = natoms
           elif type_of_potential == 'HO':
-            self.box_length = 10*np.sqrt((1./(m*omega**2))*k_T)
-            box_length = 10*np.sqrt((1./(m*omega**2))*k_T)
+            self.box_length = 100
+            box_length = 100
             N_atoms = natoms
           else:
             raise ValueError("No potential and no Lennard Jones")
@@ -105,7 +104,7 @@ class Paths:
       else: 
         if type_of_potential == 'HO':
           if spring_on:
-            box_length = 10*np.sqrt((1./(m*omega**2))*k_T)
+            box_length = 100
             N_atoms = natoms
             r = np.zeros((natoms, 3))
             if natoms == 2:
@@ -118,8 +117,25 @@ class Paths:
             else:
               ValueError("spring_on only works with 2 or 3 atoms")
             v = np.random.normal(loc = 0.0, scale = 0, size = 3*N_atoms).reshape(N_atoms, 3)
-          else:
-            box_length = 10*np.sqrt((1./(m*omega**2))*k_T)
+          elif lennard_jones:
+            r_eq = (2**(1. /6 )) * lj_sigma 
+            if init_FCC:
+              r, lattice_spacing, N_atoms, box_length = initialize_fcc_lattice2(N_cells, density)
+            else: 
+              N_atoms = natoms
+              r = np.zeros((natoms, 3))
+              box_length = 100
+              if natoms == 2:
+                r[0, :] = np.array([0.5*r_eq,0.1*r_eq,0.0])
+                r[1, :] = np.array([-0.5*r_eq,0.0,-0.1*r_eq])
+              elif natoms == 3:
+                r[0, :] = np.array([0.5*r_eq,0.0,0.0])
+                r[1, :] = np.array([-0.5*r_eq,0.0,0.0])
+                r[2, :] = np.array([0.0,0.5*r_eq,0.0])
+              else:
+                ValueError("lennard_jones_on only works with 2 or 3 atoms")
+          else: 
+            box_length = 100
             N_atoms = natoms
             r = np.random.normal(loc = 0.0, scale = np.sqrt((1./(m*omega**2))*k_T), size = 3*N_atoms).reshape(N_atoms,3)
             v = np.random.normal(loc = 0.0, scale = np.sqrt(k_T/m), size = 3*N_atoms).reshape(N_atoms, 3)
@@ -137,7 +153,7 @@ class Paths:
               N_atoms = natoms
               r = np.zeros((natoms, 3))
               #_, _, _, box_length = initialize_fcc_lattice2(N_cells, density)
-              box_length = 100*lj_sigma
+              box_length = 100
               if natoms == 2:
                 #r[0, :] = np.array([0.5*r_eq,0.0,0.0])
                 #r[1, :] = np.array([-0.5*r_eq,0.0,0.0])
@@ -477,15 +493,15 @@ class Paths:
               _, _, N_atoms, box_length = initialize_fcc_lattice2(N_cells, density)
               self.box_length = box_length
             else:
-              box_length = 100*lj_sigma
-              self.box_length = box_length
+              box_length = 100
+              self.box_length = 100
         elif type_of_potential == 'no_potential' and spring_on:  
             self.box_length = 100
             box_length = 100
             N_atoms = natoms
         elif type_of_potential == 'HO':
-            self.box_length = 10*np.sqrt((1./(m*omega**2))*k_T)
-            box_length = 10*np.sqrt((1./(m*omega**2))*k_T)
+            self.box_length = 100
+            box_length = 100
             N_atoms = natoms
         else:
             raise ValueError("No potential and no Lennard Jones")
@@ -500,6 +516,7 @@ class Paths:
 
 
         self.PI = np.random.normal(size = 2*N_horizontal*N_atoms*3, scale = np.sqrt(M*fict_k_T)).reshape((2, N_horizontal, N_atoms, 3))
+        self.PI -= np.mean(self.PI, axis = (0,1,2))
 
         self.vertical_iter = 0
         self.restart_N_vertical = 0
